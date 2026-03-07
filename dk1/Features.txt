@@ -1,0 +1,27 @@
+
++ Variables
++ Arithmetic Expressions
++ only 1 type: double
+
+Syntax:
+
+x := -5.0 # declaring and assigning a variable
+x = 2.0  # assigning an existing variable
+d := 1
+
+y := -x + -3 * - (-7 + -2) **-x + d
+z := x ** y; p := 7.1
+
+result := z + p**2
+
+newline is end of expression
+; is end of expression
+
+Operators:
+- (unary)
+**
+* /
++ -
+= *= /= += -=
+
+Program expects a variable "result" to be defined in the program and outputs its value at the end.
