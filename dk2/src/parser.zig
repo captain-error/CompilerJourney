@@ -89,8 +89,8 @@ pub const AstNode = struct {
 
     pub const Tag = enum(u8) {
         INVALID = 0,
-        DECLARE,
-        COMMAND,
+        DECLARATION,
+        ASSIGNMENT,
         BINARY_OP,
         UNARY_OP, // child at lhs, rhs == 0
         ATOM, // lhs == rhs == 0
@@ -152,7 +152,7 @@ pub const Parser = struct {
         p.errors.deinit(p.gpa);
     }
 
-    fn peak(p: *const Parser, lookahead: u32) Token {
+    fn peek(p: *const Parser, lookahead: u32) Token {
         const idx = @min(p.token_idx + lookahead, p.tokens.len - 1);
         return p.tokens[idx];
     }
@@ -188,13 +188,13 @@ pub const Parser = struct {
         };
     }
 
-    fn advanceTillCommandEndOnErr(p: *Parser, val: InternalParserError!AstNodeIndex) ParserError!AstNodeIndex {
+    fn advanceTillEoStatementOnErr(p: *Parser, val: InternalParserError!AstNodeIndex) ParserError!AstNodeIndex {
         if (val) |v| {
             return v;
         } else |err| {
             switch (err) {
                 error.UnexpectedToken => {
-                    p.advanceTillCommandEnd();
+                    p.advanceTillEoStatement();
                     return 0;
                 },
                 else => |e| return e,
@@ -202,18 +202,18 @@ pub const Parser = struct {
         }
     }
 
-    pub fn advanceTillCommandEnd(p: *Parser) void {
+    pub fn advanceTillEoStatement(p: *Parser) void {
         while (true) {
-            switch (p.peak(0).tag) {
+            switch (p.peek(0).tag) {
                 .EOF, .EOL, .SEMICOLON => return,
                 else => p.next(),
             }
         }
     }
 
-    pub fn advanceTillBlockEnd(p: *Parser) void {
+    pub fn advanceTillEoBlock(p: *Parser) void {
         while (true) {
-            switch (p.peak(0).tag) {
+            switch (p.peek(0).tag) {
                 .EOF, .END => return,
                 else => p.next(),
             }
@@ -236,7 +236,7 @@ pub const Parser = struct {
     }
 
     fn expectToken(p: *Parser, tag: Token.Tag) ParserError!bool {
-        if (p.peak(0).tag != tag) {
+        if (p.peek(0).tag != tag) {
             try p.emitError(p.token_idx, switch (tag) {
                 inline else => |t| @tagName(t),
             });
@@ -247,7 +247,7 @@ pub const Parser = struct {
     }
 
     fn expectOneOf(p: *Parser, comptime token_tags: anytype, expetation_msg: [:0]const u8) ParserError!bool {
-        const actual_tag = p.peak(0).tag;
+        const actual_tag = p.peek(0).tag;
         // std.debug.print("expectOneOf({any}): actual: {any}\n", .{ token_tags, actual_tag });
         inline for (token_tags) |tag| {
             if (actual_tag == tag)
@@ -257,8 +257,41 @@ pub const Parser = struct {
         return false;
     }
 
-    fn parseAtom(p: *Parser) InternalParserError!AstNodeIndex {
-        // std.debug.print("parseAtom: start: {s}\n", .{@tagName(p.peak(0).tag)});
+    fn expectEndOfStatement(p: *Parser) ParserError!bool {
+        switch (p.peek(0).tag) {
+            .EOL, .SEMICOLON, .EOF => return true,
+            else => {
+                try p.emitError(p.token_idx, "semicolon or end-of-line");
+                return false;
+            },
+        }
+    }
+
+    // fn parseAtom(p: *Parser) InternalParserError!AstNodeIndex {
+    //     // std.debug.print("parseAtom: start: {s}\n", .{@tagName(p.peek(0).tag)});
+
+    //     if (!try p.expectOneOf(
+    //         .{
+    //             .FLOAT_LIT,
+    //             .INT_LIT,
+    //             .TRUE,
+    //             .FALSE,
+    //             .IDENTIFIER,
+    //         },
+    //         "literal or variable",
+    //     )) return error.UnexpectedToken;
+
+    //     const idx = p.token_idx;
+    //     p.next();
+
+    //     return p.addNode(.{
+    //         .token_index = idx,
+    //         .tag = .ATOM,
+    //     });
+    // }
+
+    fn parseAtomOrFuncall(p: *Parser) InternalParserError!AstNodeIndex {
+        // std.debug.print("parseAtomOrFuncall: start: {s}\n", .{@tagName(p.peek(0).tag)});
 
         if (!try p.expectOneOf(
             .{
@@ -268,8 +301,11 @@ pub const Parser = struct {
                 .FALSE,
                 .IDENTIFIER,
             },
-            "literal or variable",
+            "literal, variable or function call",
         )) return error.UnexpectedToken;
+
+        if (p.peek(0).tag == .IDENTIFIER and p.peek(1).tag == .LPAREN)
+            return p.parseFunCall();
 
         const idx = p.token_idx;
         p.next();
@@ -281,15 +317,15 @@ pub const Parser = struct {
     }
 
     fn parseExpression(p: *Parser) InternalParserError!AstNodeIndex {
-        // std.debug.print("parseExpression: start: {s}\n", .{@tagName(p.peak(0).tag)});
+        // std.debug.print("parseExpression: start: {s}\n", .{@tagName(p.peek(0).tag)});
         return p.parseExpression1(1);
     }
 
     fn parseExpression1(p: *Parser, min_precedence: PrecedenceLevel) InternalParserError!AstNodeIndex {
-        // std.debug.print("parseExpression1: {} start: {s}\n", .{ min_precedence, @tagName(p.peak(0).tag) });
+        // std.debug.print("parseExpression1: {} start: {s}\n", .{ min_precedence, @tagName(p.peek(0).tag) });
 
         var lhs: AstNodeIndex = undefined;
-        if (p.peak(0).tag == .MINUS) {
+        if (p.peek(0).tag == .MINUS) {
             p.next();
 
             lhs = try p.addNode(.{
@@ -302,11 +338,11 @@ pub const Parser = struct {
         }
 
         while (true) {
-            if (p.peak(0).tag == .RPAREN) break;
-            if (p.peak(0).tag == .EOF) break;
+            if (p.peek(0).tag == .RPAREN) break;
+            if (p.peek(0).tag == .EOF) break;
 
             const op_precedence = p.precedenceOf(p.token_idx); // will return 0 if the token is not an operator
-            // std.debug.print("parseExpression1: {} op: {s} precedence: {} \n", .{ min_precedence, @tagName(p.peak(0).tag), op_precedence });
+            // std.debug.print("parseExpression1: {} op: {s} precedence: {} \n", .{ min_precedence, @tagName(p.peek(0).tag), op_precedence });
             if (op_precedence < min_precedence) break; // min_precedence is always > 0.
 
             const op = p.token_idx;
@@ -325,32 +361,32 @@ pub const Parser = struct {
     } // fn
 
     fn parseSubExpr(p: *Parser) InternalParserError!AstNodeIndex {
-        // std.debug.print("parseSubExpr: start: {s}\n", .{@tagName(p.peak(0).tag)});
+        // std.debug.print("parseSubExpr: start: {s}\n", .{@tagName(p.peek(0).tag)});
         var res: AstNodeIndex = undefined;
-        if (p.peak(0).tag == .LPAREN) {
+        if (p.peek(0).tag == .LPAREN) {
             p.next();
             res = try p.parseExpression1(1);
             if (!try p.expectToken(.RPAREN)) return error.UnexpectedToken;
             p.next();
         } else {
-            res = try p.parseAtom();
+            res = try p.parseAtomOrFuncall();
         }
         return res;
     }
 
     fn parseFunCall(p: *Parser) InternalParserError!AstNodeIndex {
-        std.debug.assert(p.peak(0).tag == .IDENTIFIER);
+        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
         const name_token = p.token_idx;
         p.next();
 
-        std.debug.assert(p.peak(0).tag == .LPAREN);
+        std.debug.assert(p.peek(0).tag == .LPAREN);
         p.next();
 
         var param_list = p.extra.startList(AstNodeIndex);
 
-        while (p.peak(0).tag != .RPAREN) {
+        while (p.peek(0).tag != .RPAREN) {
             try param_list.append(try p.parseExpression());
-            if (p.peak(0).tag != .COMMA) break;
+            if (p.peek(0).tag != .COMMA) break;
             p.next();
         }
 
@@ -366,16 +402,14 @@ pub const Parser = struct {
     }
 
     /// in case of parse error consumes all tokens till .EOL or .SEMICOLON and returns 0
-    fn parseCommand(p: *Parser) ParserError!AstNodeIndex {
+    fn parserDeclOrAssign(p: *Parser) InternalParserError!AstNodeIndex {
         const variable = try p.addNode(.{
             .tag = .ATOM,
             .token_index = p.token_idx,
         });
 
-        if (!try p.expectToken(.IDENTIFIER)) {
-            p.advanceTillCommandEnd();
-            return 0;
-        }
+        if (!try p.expectToken(.IDENTIFIER))
+            return error.UnexpectedToken;
         p.next();
 
         if (!try p.expectOneOf(.{
@@ -383,92 +417,115 @@ pub const Parser = struct {
             .ASSIGN,
             .PLUSASSIGN,
             .MINUSASSIGN,
-        }, "assignement or declaration operator")) {
-            p.advanceTillCommandEnd();
-            return 0;
-        }
+            .MULTASSIGN,
+            .DIVASSIGN,
+        }, "assignement or declaration operator"))
+            return error.UnexpectedToken;
 
         const op = p.token_idx;
         p.next();
 
-        const expr = p.parseExpression() catch |err| switch (err) {
-            error.UnexpectedToken => {
-                p.advanceTillCommandEnd();
-                return 0;
-            },
-            else => |e| return e,
-        };
+        const expr = try p.parseExpression();
 
-        if (!try p.expectOneOf(.{
-            .SEMICOLON,
-            .EOL,
-            .EOF,
-        }, "semicolon or end-of-line")) {
-            p.advanceTillCommandEnd();
-            return 0;
-        }
+        if (!try p.expectEndOfStatement())
+            return error.UnexpectedToken;
         p.next();
 
         return try p.addNode(.{
-            .tag = .COMMAND,
+            .tag = if (p.tokens[op].tag == .DECLARE) .DECLARATION else .ASSIGNMENT,
             .token_index = op,
             .lhs = variable,
             .rhs = expr,
         });
     }
 
-    pub fn parseWhile(p: *Parser) ParserError!AstNodeIndex {
-        std.debug.assert(p.peak(0).tag == .WHILE);
+    pub fn parseWhile(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .WHILE);
         var res = AstNode{ .token_index = p.token_idx, .tag = .WHILE };
         p.next();
 
-        res.lhs = try p.advanceTillCommandEndOnErr(p.parseExpression());
+        res.lhs = try p.parseExpression();
 
-        if (!try p.expectToken(.EOL)) {
-            p.advanceTillCommandEnd();
-            return 0;
-        }
+        if (!try p.expectToken(.EOL))
+            return error.UnexpectedToken;
         p.next();
 
         res.rhs = try p.parseBlock();
-        if (!try p.expectToken(.END)) {
-            // p.advanceTillBlockEnd();
-            // p.next();
-            return 0;
-        }
+
+        if (!try p.expectToken(.END))
+            return error.UnexpectedToken;
         p.next();
 
         return try p.addNode(res);
     }
 
-    pub fn parseIf(p: *Parser) ParserError!AstNodeIndex {
-        std.debug.assert(p.peak(0).tag == .IF);
+    pub fn parseIf(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .IF);
         var res = AstNode{ .token_index = p.token_idx, .tag = .IF };
         p.next();
 
-        res.lhs = try p.advanceTillCommandEndOnErr(p.parseExpression());
+        res.lhs = try p.parseExpression();
 
-        if (!try p.expectToken(.EOL)) {
-            p.advanceTillCommandEnd();
-            return 0;
-        }
+        if (!try p.expectToken(.EOL))
+            return error.UnexpectedToken;
         p.next();
 
         try res.setThen(try p.parseBlock());
-        if (p.peak(0).tag == .ELSE) {
+        if (p.peek(0).tag == .ELSE) {
             p.next();
 
             res.rhs = try p.parseBlock();
         }
 
-        if (!try p.expectToken(.END)) {
-            p.advanceTillBlockEnd();
-            p.next();
-            return 0;
-        }
+        // if (!try p.expectToken(.END)) {
+        //     p.advanceTillEoBlock();
+        //     p.next();
+        //     return 0;
+        // }
+
+        if (!try p.expectToken(.END))
+            return error.UnexpectedToken;
+
         p.next();
 
         return try p.addNode(res);
+    }
+
+    pub fn parseStatement(p: *Parser) ParserError!AstNodeIndex {
+        var res: InternalParserError!AstNodeIndex = 0;
+        switch (p.peek(0).tag) {
+            // zig fmt: off
+            .IF         => res = p.parseIf(),
+            .WHILE      => res = p.parseWhile(),
+            // zig fmt: on
+            .IDENTIFIER => {
+                if (p.peek(1).tag == .LPAREN) {
+                    res = p.parseFunCall();
+                    if (res) |_| {
+                        if (try p.expectEndOfStatement()) {
+                            p.next();
+                        } else {
+                            res = error.UnexpectedToken;
+                        }
+                    } else |_| {}
+                } else {
+                    res = p.parserDeclOrAssign();
+                }
+            },
+            else => {
+                try p.emitError(p.token_idx, "statement");
+                res = error.UnexpectedToken;
+            },
+        }
+
+        return res catch |err| switch (err) {
+            error.UnexpectedToken => {
+                p.advanceTillEoStatement();
+                p.next();
+                return 0;
+            },
+            else => |e| e,
+        };
     }
 
     // does not consume .END!
@@ -478,22 +535,19 @@ pub const Parser = struct {
         var child_list = p.extra.startList(AstNodeIndex);
 
         loop: while (true) {
-            const token = p.peak(0);
+            const token = p.peek(0);
             // std.debug.print("#### {} {s}[{s}]\n", .{ p.token_idx, @tagName(token.tag), token.str(p.source) });
             switch (token.tag) {
-                .EOF, .END, .ELSE => break :loop,
-                .EOL, .SEMICOLON => p.next(), // ignore
                 // zig fmt: off
-                .IF         => try child_list.append(try p.parseIf()     ),
-                .WHILE      => try child_list.append(try p.parseWhile()  ),
-                .IDENTIFIER => try child_list.append(try p.parseCommand()),
-                // zig fmt: on
+                .EOF, .END, .ELSE => break :loop,
+                .EOL, .SEMICOLON  => p.next(), // ignore
+
                 else => {
-                    try p.emitError(p.token_idx, "UNEXPECTED!");
-                    p.advanceTillBlockEnd();
-                    p.next();
-                    return 0;
+                    const node_idx = try p.parseStatement();
+                    try child_list.append(node_idx);
                 },
+                // zig fmt: on
+
             } // switch token
         }
 
@@ -505,9 +559,9 @@ pub const Parser = struct {
         });
     }
 
-    pub fn parse(p: *Parser) ParserError!void {
-        // p.token_idx = 1;
+    pub fn parse(p: *Parser) ParserError!AstNodeIndex {
         p.root_node = try p.parseBlock();
+        return p.root_node;
     }
 
     pub fn printErrors(p: *const Parser, writer: *std.Io.Writer, ts: TokenStream) !void {
@@ -554,7 +608,8 @@ pub const Parser = struct {
     }
 };
 
-fn testParser(source: []const u8, parse_func: fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex, print_always: bool) !void {
+// fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex
+fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void {
     const gpa = std.testing.allocator;
 
     var stdout_buff: [1024]u8 = undefined;
@@ -618,7 +673,7 @@ fn testParser(source: []const u8, parse_func: fn (parser: *Parser) Parser.Intern
             try parser.printAstBranch(stdout, ast_idx, 1);
         }
 
-        if (!print_always) {
+        if (parser.hasErrors()) {
             try stdout.print("\nPARSER REPORTED ERRORS:\n", .{});
             try parser.printErrors(stdout, ts);
             return error.ParserReportedErrors;
@@ -673,13 +728,23 @@ test "just arithmetic" {
     try testParser(source, Parser.parseBlock, false);
 }
 
-test "while" {
+test "simple while" {
     const source =
         \\ while a
         \\  x += 2.0
         \\ end
     ;
     try testParser(source, Parser.parseWhile, false);
+}
+
+test "complex while" {
+    const source =
+        \\ while a < 20
+        \\  x += 2.0
+        \\  b = 7
+        \\ end
+    ;
+    try testParser(source, Parser.parseWhile, true);
 }
 
 test "if" {
@@ -741,7 +806,26 @@ test "parse function call wit 2 params" {
 
 test "parse function call wit 2 params + trailing comma" {
     const source = "doStuff(a, b,)";
-    try testParser(source, Parser.parseFunCall, true);
+    try testParser(source, Parser.parseFunCall, false);
+}
+
+test "parse function with parser.parse()" {
+    const source = "doStuff(a, b,)";
+    try testParser(source, Parser.parse, false);
+}
+
+test "parse complex program" {
+    const source =
+        \\ jahr := 0
+        \\ zins := 1.02
+        \\ result := 1.0
+        \\ while jahr < 10
+        \\      result *= zins
+        \\      jahr += 1
+        \\ end
+        \\ print(result)
+    ;
+    try testParser(source, Parser.parse, true);
 }
 
 // test "Parser" {
