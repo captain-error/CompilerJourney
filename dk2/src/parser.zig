@@ -1,16 +1,69 @@
 const std = @import("std");
 const tok = @import("tokenizer.zig");
-const exdat = @import("extra_data.zig");
+const treemod = @import("tree.zig");
+// const exdat = @import("extra_data.zig");
+
+const assert = std.debug.assert;
 
 const Token = tok.Token;
 const Tokenizer = tok.Tokenizer;
 const TokenStream = tok.TokenStream;
 const TokenIndex = TokenStream.TokenIndex;
-const ExtraData = exdat.ExtraData;
-const ExtraIndex = exdat.ExtraIndex;
 
-pub const AstNodeIndex = u32;
-pub const AstNodeOffset = u16;
+pub const AST = treemod.GenericTree(AstNode);
+pub const AstNodeIndex = treemod.NodeIndex;
+
+pub const AstNode = struct {
+    tag: AstNodeTag = .INVALID,
+    token_index: TokenIndex = 0,
+
+    first_child: AstNodeIndex = 0,
+    next_sibling: AstNodeIndex = 0,
+
+    pub fn hasChild(node: AstNode) bool {
+        return node.first_child > 0;
+    }
+
+    pub fn children(node: AstNode, ast: *const AST) AST.LinkedList {
+        return ast.getList(node.first_child);
+    }
+
+    // convenience methods for certain node kinds:
+    pub const ConditionThenElse = struct { cond_idx: AstNodeIndex, then_idx: AstNodeIndex, else_idx: AstNodeIndex };
+    pub fn conditionThenElse(node: AstNode, ast: *const AST) ConditionThenElse {
+        assert(node.tag == .IF or node.tag == .WHILE);
+
+        const cond_idx = node.first_child;
+        const then_idx = ast.get(cond_idx).next_sibling;
+        const else_idx = ast.get(then_idx).next_sibling;
+
+        assert(cond_idx != 0);
+        assert(then_idx != 0);
+
+        return .{ .cond_idx = cond_idx, .then_idx = then_idx, .else_idx = else_idx };
+    }
+
+    pub fn then(node: AstNode, ast: *const AST) AstNodeIndex {
+        assert(node.tag == .IF);
+        const then_idx = ast.get(node.first_child).next_sibling;
+        assert(then_idx != 0);
+        return then_idx;
+    }
+};
+
+pub const AstNodeTag = enum(u8) {
+    INVALID = 0,
+    DECLARATION, // 2 children: lhs, rhs
+    ASSIGNMENT, // 2 children: lhs, rhs
+    BINARY_OP, // 2 children: lhs, rhs
+    UNARY_OP, // 1 child
+    ATOM, // no child
+    FNCALL, // N children for N params
+    IF, // 3 children: condition, then, else
+    WHILE, // 2 children: condition
+    BLOCK, // arbitrary many children
+};
+
 pub const PrecedenceLevel = u8;
 
 const ParserError = error{
@@ -19,95 +72,80 @@ const ParserError = error{
     InternalCompilerError,
 };
 
-pub const AstNode = struct {
-    tag: Tag = .INVALID,
-    token_index: TokenIndex = 0,
+// pub const AstNode = struct {
+//     tag: Tag = .INVALID,
+//     token_index: TokenIndex = 0,
 
-    lhs: AstNodeIndex = 0,
-    rhs: AstNodeIndex = 0,
-    offset: AstNodeOffset = 0,
+//     lhs: AstNodeIndex = 0,
+//     rhs: AstNodeIndex = 0,
+//     offset: AstNodeOffset = 0,
 
-    pub fn childCount(n: AstNode) usize {
-        std.debug.assert(n.tag == .BLOCK or n.tag == .FNCALL);
-        return n.lhs;
-    }
+//     pub fn childCount(n: AstNode) usize {
+//         std.debug.assert(n.tag == .BLOCK or n.tag == .FNCALL);
+//         return n.lhs;
+//     }
 
-    // pub fn childIndices(n: AstNode, extra: []AstNodeIndex) []AstNodeIndex {
-    //     std.debug.assert(n.tag == .BLOCK);
-    //     return extra[n.rhs .. n.rhs + n.lhs];
-    // }
+//     // pub fn childIndices(n: AstNode, extra: []AstNodeIndex) []AstNodeIndex {
+//     //     std.debug.assert(n.tag == .BLOCK);
+//     //     return extra[n.rhs .. n.rhs + n.lhs];
+//     // }
 
-    pub fn firstChild(n: AstNode, extra: *const ExtraData) ExtraListElem {
-        return extra.get(n.rhs).*;
-    }
+//     pub fn firstChild(n: AstNode, extra: *const ExtraData) ExtraListElem {
+//         return extra.get(n.rhs).*;
+//     }
 
-    pub fn condition(n: AstNode) AstNodeIndex {
-        std.debug.assert(n.tag == .IF or n.tag == .WHILE);
-        return n.lhs;
-    }
+//     pub fn condition(n: AstNode) AstNodeIndex {
+//         std.debug.assert(n.tag == .IF or n.tag == .WHILE);
+//         return n.lhs;
+//     }
 
-    pub fn then(n: AstNode) AstNodeIndex {
-        std.debug.assert(n.tag == .IF);
-        if (n.offset == 0) return 0;
-        return n.lhs + @as(AstNodeIndex, @intCast(n.offset));
-    }
+//     pub fn then(n: AstNode) AstNodeIndex {
+//         std.debug.assert(n.tag == .IF);
+//         if (n.offset == 0) return 0;
+//         return n.lhs + @as(AstNodeIndex, @intCast(n.offset));
+//     }
 
-    pub fn setThen(n: *AstNode, then_idx: AstNodeIndex) !void {
-        std.debug.assert(n.tag == .IF);
-        std.debug.assert(n.lhs != 0);
-        // std.debug.assert(then_idx > 0);
-        if (then_idx == 0) {
-            n.offset = 0;
-            return;
-        }
-        const offset = then_idx - n.lhs;
-        if (offset > 0xffff)
-            return error.IfConditionIsTooLong;
-        n.offset = @intCast(offset);
-    }
+//     pub fn setThen(n: *AstNode, then_idx: AstNodeIndex) !void {
+//         std.debug.assert(n.tag == .IF);
+//         std.debug.assert(n.lhs != 0);
+//         // std.debug.assert(then_idx > 0);
+//         if (then_idx == 0) {
+//             n.offset = 0;
+//             return;
+//         }
+//         const offset = then_idx - n.lhs;
+//         if (offset > 0xffff)
+//             return error.IfConditionIsTooLong;
+//         n.offset = @intCast(offset);
+//     }
 
-    pub fn else_(n: AstNode) AstNodeIndex {
-        std.debug.assert(n.tag == .IF);
-        return n.rhs;
-    }
+//     pub fn else_(n: AstNode) AstNodeIndex {
+//         std.debug.assert(n.tag == .IF);
+//         return n.rhs;
+//     }
 
-    pub fn body(n: AstNode) AstNodeIndex {
-        std.debug.assert(n.tag == .WHILE);
-        return n.rhs;
-    }
+//     pub fn body(n: AstNode) AstNodeIndex {
+//         std.debug.assert(n.tag == .WHILE);
+//         return n.rhs;
+//     }
 
-    const ExtraListElem = struct {
-        node_idx: AstNodeIndex = 0,
-        next: ExtraData.ExtraIndex = 0,
+//     const ExtraListElem = struct {
+//         node_idx: AstNodeIndex = 0,
+//         next: ExtraData.ExtraIndex = 0,
 
-        fn nextSibling(el: ExtraListElem, extra: *const ExtraData) ExtraListElem {
-            std.debug.assert(el.next != 0);
-            std.debug.assert(el.next <= extra.data.items.len);
-            return extra.get(el.next).*;
-        }
-    };
+//         fn nextSibling(el: ExtraListElem, extra: *const ExtraData) ExtraListElem {
+//             std.debug.assert(el.next != 0);
+//             std.debug.assert(el.next <= extra.data.items.len);
+//             return extra.get(el.next).*;
+//         }
+//     };
 
-    pub const Tag = enum(u8) {
-        INVALID = 0,
-        DECLARATION,
-        ASSIGNMENT,
-        BINARY_OP,
-        UNARY_OP, // child at lhs, rhs == 0
-        ATOM, // lhs == rhs == 0
-        FNCALL, // single argument at lhs
-        IF, // condition at lhs, then-part at lhs+offset, else-part at rhs
-        WHILE,
-        BLOCK, // lhs contains child count, rhs contains index into parser.extra
-    };
-};
+// };
 
 pub const Parser = struct {
     source: []const u8,
     tokens: []const Token,
-    ast_nodes: std.ArrayList(AstNode) = .empty,
-    extra: ExtraData,
-    // extra: std.ArrayList(AstNodeIndex) = .empty,
-    // top_level_commands: std.ArrayList(AstNodeIndex) = .empty,
+    ast: AST,
     root_node: AstNodeIndex = 0,
     errors: std.ArrayList(Error) = .empty,
     gpa: std.mem.Allocator,
@@ -133,22 +171,17 @@ pub const Parser = struct {
     pub fn init(source: []const u8, tokens: []const Token, gpa: std.mem.Allocator) !Parser {
         std.debug.assert(tokens.len > 0);
         const approximate_ast_node_count = tokens.len + 1; // TODO: revise this
-        var res = Parser{
-            .ast_nodes = try .initCapacity(gpa, approximate_ast_node_count),
+        return .{
+            .ast = try .init(gpa, approximate_ast_node_count),
             .source = source,
             .tokens = tokens,
             .gpa = gpa,
             .token_idx = 1,
-            .extra = try .init(gpa, approximate_ast_node_count),
         };
-
-        res.ast_nodes.appendAssumeCapacity(.{}); // add empty invalid node
-        return res;
     }
 
     pub fn deinit(p: *Parser) void {
-        p.ast_nodes.deinit(p.gpa);
-        p.extra.deinit();
+        p.ast.deinit();
         p.errors.deinit(p.gpa);
     }
 
@@ -164,12 +197,12 @@ pub const Parser = struct {
         p.token_idx += 1;
     }
 
-    fn addNode(p: *Parser, node: AstNode) !AstNodeIndex {
-        // std.debug.print("addNode: {any} token={any}\n", .{ node, p.tokens[node.token_index] });
-        const index: AstNodeIndex = @intCast(p.ast_nodes.items.len);
-        try p.ast_nodes.append(p.gpa, node);
-        return index;
-    }
+    // fn addNode(p: *Parser, node: AstNode) !AstNodeIndex {
+    //     // std.debug.print("addNode: {any} token={any}\n", .{ node, p.tokens[node.token_index] });
+    //     const index: AstNodeIndex = @intCast(p.ast.nodes.items.len);
+    //     try p.ast_nodes.append(p.gpa, node);
+    //     return index;
+    // }
 
     // fn addExtra(p: *Parser, node_index: AstNodeIndex) !void {
     //     try p.extra.append(p.gpa, node_index);
@@ -310,7 +343,7 @@ pub const Parser = struct {
         const idx = p.token_idx;
         p.next();
 
-        return p.addNode(.{
+        return p.ast.append(.{
             .token_index = idx,
             .tag = .ATOM,
         });
@@ -326,13 +359,12 @@ pub const Parser = struct {
 
         var lhs: AstNodeIndex = undefined;
         if (p.peek(0).tag == .MINUS) {
-            p.next();
-
-            lhs = try p.addNode(.{
+            lhs = try p.ast.append(.{
                 .tag = .UNARY_OP,
                 .token_index = p.token_idx,
-                .lhs = try p.parseSubExpr(),
             });
+            p.next();
+            p.ast.get(lhs).first_child = try p.parseSubExpr();
         } else {
             lhs = try p.parseSubExpr();
         }
@@ -348,14 +380,16 @@ pub const Parser = struct {
             const op = p.token_idx;
             p.next();
 
-            const rhs = try p.parseExpression1(op_precedence);
-
-            lhs = try p.addNode(.{
+            const binop_idx = try p.ast.append(.{
                 .tag = .BINARY_OP,
                 .token_index = op,
-                .lhs = lhs,
-                .rhs = rhs,
+                .first_child = lhs,
             });
+
+            const rhs = try p.parseExpression1(op_precedence);
+            p.ast.get(lhs).next_sibling = rhs;
+
+            lhs = binop_idx;
         } // outer while
         return lhs;
     } // fn
@@ -382,10 +416,15 @@ pub const Parser = struct {
         std.debug.assert(p.peek(0).tag == .LPAREN);
         p.next();
 
-        var param_list = p.extra.startList(AstNodeIndex);
+        const node_idx = try p.ast.append(.{
+            .tag = .FNCALL,
+            .token_index = name_token,
+        });
+
+        var param_list = p.ast.startList();
 
         while (p.peek(0).tag != .RPAREN) {
-            try param_list.append(try p.parseExpression());
+            try param_list.appendExisting(try p.parseExpression());
             if (p.peek(0).tag != .COMMA) break;
             p.next();
         }
@@ -393,23 +432,25 @@ pub const Parser = struct {
         if (!try p.expectToken(.RPAREN)) return error.UnexpectedToken;
         p.next();
 
-        return p.addNode(.{
-            .tag = .FNCALL,
-            .token_index = name_token,
-            .lhs = param_list.count,
-            .rhs = param_list.start_index,
-        });
+        p.ast.get(node_idx).first_child = param_list.start_index;
+
+        return node_idx;
     }
 
     /// in case of parse error consumes all tokens till .EOL or .SEMICOLON and returns 0
     fn parserDeclOrAssign(p: *Parser) InternalParserError!AstNodeIndex {
-        const variable = try p.addNode(.{
+        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
+
+        // reserve space:
+        const node_idx = try p.ast.append(.{});
+
+        const variable_idx = try p.ast.append(.{
             .tag = .ATOM,
             .token_index = p.token_idx,
         });
 
-        if (!try p.expectToken(.IDENTIFIER))
-            return error.UnexpectedToken;
+        // if (!try p.expectToken(.IDENTIFIER))
+        //     return error.UnexpectedToken;
         p.next();
 
         if (!try p.expectOneOf(.{
@@ -425,70 +466,78 @@ pub const Parser = struct {
         const op = p.token_idx;
         p.next();
 
-        const expr = try p.parseExpression();
+        const rhs = try p.parseExpression();
 
         if (!try p.expectEndOfStatement())
             return error.UnexpectedToken;
         p.next();
 
-        return try p.addNode(.{
+        const node = p.ast.get(node_idx);
+        node.* = .{
             .tag = if (p.tokens[op].tag == .DECLARE) .DECLARATION else .ASSIGNMENT,
             .token_index = op,
-            .lhs = variable,
-            .rhs = expr,
-        });
+            .first_child = variable_idx,
+        };
+
+        p.ast.get(variable_idx).next_sibling = rhs;
+
+        return node_idx;
     }
 
     pub fn parseWhile(p: *Parser) InternalParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .WHILE);
-        var res = AstNode{ .token_index = p.token_idx, .tag = .WHILE };
+        const node_idx = try p.ast.append(.{ .token_index = p.token_idx, .tag = .WHILE });
         p.next();
 
-        res.lhs = try p.parseExpression();
+        const condition_idx = try p.parseExpression();
 
         if (!try p.expectToken(.EOL))
             return error.UnexpectedToken;
         p.next();
 
-        res.rhs = try p.parseBlock();
+        const body_idx = try p.parseBlock();
 
         if (!try p.expectToken(.END))
             return error.UnexpectedToken;
         p.next();
 
-        return try p.addNode(res);
+        p.ast.get(node_idx).first_child = condition_idx;
+        p.ast.get(condition_idx).next_sibling = body_idx;
+
+        return node_idx;
     }
 
     pub fn parseIf(p: *Parser) InternalParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .IF);
-        var res = AstNode{ .token_index = p.token_idx, .tag = .IF };
+        const node_idx = try p.ast.append(.{ .token_index = p.token_idx, .tag = .IF });
         p.next();
 
-        res.lhs = try p.parseExpression();
+        const condition_idx = try p.parseExpression();
 
         if (!try p.expectToken(.EOL))
             return error.UnexpectedToken;
         p.next();
 
-        try res.setThen(try p.parseBlock());
+        const then_idx = try p.parseBlock();
+
+        var else_idx: AstNodeIndex = 0;
         if (p.peek(0).tag == .ELSE) {
             p.next();
 
-            res.rhs = try p.parseBlock();
+            else_idx = try p.parseBlock();
         }
-
-        // if (!try p.expectToken(.END)) {
-        //     p.advanceTillEoBlock();
-        //     p.next();
-        //     return 0;
-        // }
 
         if (!try p.expectToken(.END))
             return error.UnexpectedToken;
 
         p.next();
 
-        return try p.addNode(res);
+        p.ast.get(node_idx).first_child = condition_idx;
+        p.ast.get(condition_idx).next_sibling = then_idx;
+        if (else_idx > 0)
+            p.ast.get(then_idx).next_sibling = else_idx;
+
+        return node_idx;
     }
 
     pub fn parseStatement(p: *Parser) ParserError!AstNodeIndex {
@@ -532,7 +581,12 @@ pub const Parser = struct {
     pub fn parseBlock(p: *Parser) ParserError!AstNodeIndex {
         const token_idx = p.token_idx;
 
-        var child_list = p.extra.startList(AstNodeIndex);
+        const block_node_idx = try p.ast.append(.{
+            .token_index = token_idx,
+            .tag = .BLOCK,
+        });
+
+        var child_list = p.ast.startList();
 
         loop: while (true) {
             const token = p.peek(0);
@@ -544,19 +598,15 @@ pub const Parser = struct {
 
                 else => {
                     const node_idx = try p.parseStatement();
-                    try child_list.append(node_idx);
+                    try child_list.appendExisting(node_idx);
                 },
                 // zig fmt: on
 
             } // switch token
         }
 
-        return p.addNode(.{
-            .token_index = token_idx,
-            .tag = .BLOCK,
-            .lhs = child_list.count,
-            .rhs = child_list.start_index, // index of first child-index
-        });
+        p.ast.get(block_node_idx).first_child = child_list.start_index;
+        return block_node_idx;
     }
 
     pub fn parse(p: *Parser) ParserError!AstNodeIndex {
@@ -581,32 +631,74 @@ pub const Parser = struct {
             return;
         }
 
-        const node = p.ast_nodes.items[ast_index];
+        const node = p.ast.get(ast_index).*;
         const token = p.tokens[node.token_index];
 
-        try writer.print("{s} ({s}[{s}])    ", .{
+        try writer.print("{s} ({s}[{s}]) #{} (next_sibling={})\n", .{
             @tagName(node.tag),
             @tagName(token.tag),
-            if (token.tag == .EOL) "\\n" else token.str(p.source),
+            if (token.tag == .EOL) "" else token.str(p.source),
+            ast_index,
+            p.ast.get(ast_index).next_sibling,
         });
 
-        if (node.tag == .BLOCK or node.tag == .FNCALL) {
-            try writer.print(" #children= {}\n", .{node.childCount()});
-            var child_list = p.extra.getList(AstNodeIndex, node.rhs);
-            while (child_list.next()) |i|
-                try p.printAstBranch(writer, i, indentation + 1);
+        if (node.hasChild()) {
+            var child_list = node.children(&p.ast);
+            while (child_list.nextIdx()) |child_idx|
+                try p.printAstBranch(writer, child_idx, indentation + 1);
+        }
+        // if (node.tag == .BLOCK or node.tag == .FNCALL) {
+        //     try writer.print(" #children= {}\n", .{node.childCount()});
+        //     var child_list = p.extra.getList(AstNodeIndex, node.rhs);
+        //     while (child_list.next()) |i|
+        //         try p.printAstBranch(writer, i, indentation + 1);
 
-            return;
+        //     return;
+        // }
+        // try writer.writeByte('\n');
+
+        // if (node.tag == .ATOM) return;
+        // try p.printAstBranch(writer, node.lhs, indentation + 1);
+
+        // if (node.tag == .UNARY_OP) return;
+        // try p.printAstBranch(writer, node.rhs, indentation + 1);
+    }
+
+    pub fn printAllNodesFlat(p: *const Parser, writer: *std.Io.Writer) !void {
+        for (p.ast.nodes.items, 0..) |node, idx| {
+            const token = p.tokens[node.token_index];
+            try writer.print("{s} ({s}[{s}]))#{} ", .{
+                @tagName(node.tag),
+                @tagName(token.tag),
+                token.str(p.source),
+                idx,
+            });
         }
         try writer.writeByte('\n');
-
-        if (node.tag == .ATOM) return;
-        try p.printAstBranch(writer, node.lhs, indentation + 1);
-
-        if (node.tag == .UNARY_OP) return;
-        try p.printAstBranch(writer, node.rhs, indentation + 1);
     }
 };
+
+fn testAstStructure(ast: *const AST) void {
+    for (1..ast.nodes.items.len) |i| {
+        const idx: u32 = @intCast(i);
+        const node = ast.get(idx).*;
+        const num_kids = ast.countChildrenOf(idx);
+        switch (node.tag) {
+            // zig fmt: off
+            .INVALID     => unreachable,
+            .ASSIGNMENT  => assert(num_kids == 2),
+            .DECLARATION => assert(num_kids == 2),
+            .BINARY_OP   => assert(num_kids == 2),
+            .ATOM        => assert(num_kids == 0),
+            .IF          => assert(num_kids == 2 or num_kids == 3),
+            .WHILE       => assert(num_kids == 2),
+            .UNARY_OP    => assert(num_kids == 1),
+            .BLOCK       => {},
+            .FNCALL      => {},
+            // zig fmt: on
+        }
+    }
+}
 
 // fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex
 fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void {
@@ -633,7 +725,7 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
         // try parser.printAstBranch(stdout, parser.root_node, 1);
 
         try stdout.writeAll("--- all AST nodes:\n");
-        for (parser.ast_nodes.items) |node| {
+        for (parser.ast.nodes.items) |node| {
             const token = ts.tokens[node.token_index];
             try stdout.print("{s} ({s}[{s}])) ", .{ @tagName(node.tag), @tagName(token.tag), token.str(source) });
         }
@@ -653,6 +745,7 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
         for (ts.tokens[parser.token_idx..]) |t|
             try stdout.print("{s}[{s}] ", .{ @tagName(t.tag), t.str(source) });
         try stdout.print("\n\n", .{});
+        testAstStructure(&parser.ast);
         return error.NotAllTokensUsed;
     }
 
@@ -663,7 +756,7 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
 
         if (ast_idx == 0) {
             try stdout.writeAll("--- all AST nodes:\n");
-            for (parser.ast_nodes.items) |node| {
+            for (parser.ast.nodes.items) |node| {
                 const token = ts.tokens[node.token_index];
                 try stdout.print("{s} ({s}[{s}])) ", .{ @tagName(node.tag), @tagName(token.tag), token.str(source) });
             }
@@ -680,6 +773,8 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
         }
     }
 
+    testAstStructure(&parser.ast);
+
     // try ts.prettyPrintTokens(stdout);
     // try stdout.writeAll("-----------------------\n\n");
 
@@ -689,7 +784,7 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
     // try parser.printAstBranch(stdout, ast_idx, 1);
 
     // try stdout.writeAll("\n--- all AST nodes:\n");
-    // for (parser.ast_nodes.items) |node| {
+    // for (parser.ast.nodes.items) |node| {
     //     const token = ts.tokens[node.token_index];
     //     try stdout.print("{s} ({s}[{s}]) ", .{ @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(source) });
     // }
@@ -744,7 +839,7 @@ test "complex while" {
         \\  b = 7
         \\ end
     ;
-    try testParser(source, Parser.parseWhile, true);
+    try testParser(source, Parser.parseWhile, false);
 }
 
 test "if" {
@@ -825,7 +920,7 @@ test "parse complex program" {
         \\ end
         \\ print(result)
     ;
-    try testParser(source, Parser.parse, true);
+    try testParser(source, Parser.parse, false);
 }
 
 // test "Parser" {
@@ -851,7 +946,7 @@ test "parse complex program" {
 //     var parser = try Parser.init(source, ts.tokens, gpa);
 //     defer parser.deinit();
 //     try parser.parse();
-//     // std.debug.print("ast nodes: {}\n", .{parser.ast_nodes.items.len});
+//     // std.debug.print("ast nodes: {}\n", .{parser.ast.nodes.items.len});
 //     if (parser.hasErrors()) {
 //         try parser.printErrors(stdout, ts);
 //     }

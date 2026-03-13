@@ -2,18 +2,16 @@ const std = @import("std");
 const tok = @import("tokenizer.zig");
 const par = @import("parser.zig");
 
-const exdat = @import("extra_data.zig");
+const assert = std.debug.assert;
 
 const Token = tok.Token;
 const TokenStream = tok.TokenStream;
 const TokenIndex = TokenStream.TokenIndex;
 
+const AST = par.AST;
 const AstNode = par.AstNode;
 const Parser = par.Parser;
 const AstNodeIndex = par.AstNodeIndex;
-
-const ExtraData = exdat.ExtraData;
-const ExtraIndex = exdat.ExtraIndex;
 
 const builtin_functions = [_][:0]const u8{
     "print",
@@ -22,8 +20,7 @@ const builtin_functions = [_][:0]const u8{
 pub const SemanticValidator = struct {
     source: []const u8,
     tokens: []const Token,
-    ast_nodes: []const AstNode,
-    extra: *const ExtraData,
+    ast: *const AST,
     root_index: AstNodeIndex,
     gpa: std.mem.Allocator,
 
@@ -61,8 +58,7 @@ pub const SemanticValidator = struct {
         var v = SemanticValidator{
             .source = parser.source,
             .tokens = parser.tokens,
-            .ast_nodes = parser.ast_nodes.items,
-            .extra = &parser.extra,
+            .ast = &parser.ast,
             .root_index = parser.root_node,
             .gpa = gpa,
             .declarations = undefined,
@@ -156,7 +152,8 @@ pub const SemanticValidator = struct {
     }
 
     fn validateExpression(v: *SemanticValidator, node_idx: AstNodeIndex) SemanticValidatorException!void {
-        const node = v.ast_nodes[node_idx];
+        assert(node_idx > 0);
+        const node = v.ast.get(node_idx).*;
         switch (node.tag) {
             .ATOM => {
                 const token = v.tokens[node.token_index];
@@ -164,10 +161,11 @@ pub const SemanticValidator = struct {
                     try v.validateVariableUsage(node.token_index);
             },
             .FNCALL => try v.validateFnCall(node),
-            .UNARY_OP => try v.validateExpression(node.lhs),
+            .UNARY_OP => try v.validateExpression(node.first_child),
             .BINARY_OP => {
-                try v.validateExpression(node.lhs);
-                try v.validateExpression(node.rhs);
+                std.debug.print("binray op: {}.first_child=={}.next_sibling=={}\n", .{ node_idx, node.first_child, v.ast.get(node.first_child).next_sibling });
+                try v.validateExpression(node.first_child);
+                try v.validateExpression(v.ast.get(node.first_child).next_sibling);
             },
             else => unreachable,
         }
@@ -180,49 +178,55 @@ pub const SemanticValidator = struct {
             if (!std.mem.eql(u8, funcname, token.str(v.source))) {
                 try v.errors.append(v.gpa, .{ .unknown_function = node.token_index });
             }
-            var argument_list = v.extra.getList(AstNodeIndex, node.rhs);
-            while (argument_list.next()) |child_idx|
+            var argument_list = node.children(v.ast);
+            while (argument_list.nextIdx()) |child_idx|
                 try v.validateExpression(child_idx);
         }
     }
 
     fn validateAssignment(v: *SemanticValidator, node: AstNode) !void {
         std.debug.assert(node.tag == .ASSIGNMENT);
-        const lhs_var_token_index = v.ast_nodes[node.lhs].token_index;
+        const var_node = v.ast.get(node.first_child);
+        const lhs_var_token_index = var_node.token_index;
         const lhs_variable = v.tokens[lhs_var_token_index];
         // const lhs_varname = lhs_variable.str(v.source);
         std.debug.assert(lhs_variable.tag == .IDENTIFIER);
 
         try v.validateVariableUsage(lhs_var_token_index);
 
-        try v.validateExpression(node.rhs);
+        try v.validateExpression(var_node.next_sibling);
     }
 
     fn validateDeclaration(v: *SemanticValidator, node: AstNode) !void {
         std.debug.assert(node.tag == .DECLARATION);
-        const lhs_var_token_index = v.ast_nodes[node.lhs].token_index;
+        const var_node = v.ast.get(node.first_child);
+        const lhs_var_token_index = var_node.token_index;
         const lhs_variable = v.tokens[lhs_var_token_index];
         // const lhs_varname = lhs_variable.str(v.source);
         std.debug.assert(lhs_variable.tag == .IDENTIFIER);
 
-        try v.validateExpression(node.rhs);
+        try v.validateExpression(var_node.next_sibling);
 
         try v.registerDeclaration(lhs_var_token_index);
     }
 
     fn validateWhile(v: *SemanticValidator, node: AstNode) !void {
-        try v.validateExpression(node.lhs);
-        try v.validateBlock(node.rhs);
+        try v.validateExpression(node.first_child);
+        try v.validateBlock(v.ast.get(node.first_child).next_sibling);
     }
 
     fn validateIf(v: *SemanticValidator, node: AstNode) !void {
-        try v.validateExpression(node.condition());
-        try v.validateBlock(node.then());
-        try v.validateBlock(node.else_());
+        const children = node.conditionThenElse(v.ast);
+        try v.validateExpression(children.cond_idx);
+        try v.validateBlock(children.then_idx);
+        if (children.else_idx != 0)
+            try v.validateBlock(children.else_idx);
     }
 
     fn validateStatement(v: *SemanticValidator, node_idx: AstNodeIndex) !void {
-        const node = v.ast_nodes[node_idx];
+        assert(node_idx > 0);
+
+        const node = v.ast.get(node_idx).*;
         switch (node.tag) {
             // zig fmt: off
             .ASSIGNMENT  => try v.validateAssignment(node),
@@ -236,10 +240,12 @@ pub const SemanticValidator = struct {
     }
 
     fn validateBlock(v: *SemanticValidator, node_idx: AstNodeIndex) SemanticValidatorException!void {
-        const node = v.ast_nodes[node_idx];
+        assert(node_idx > 0);
+
+        const node = v.ast.get(node_idx);
         std.debug.assert(node.tag == .BLOCK);
-        var children = v.extra.getList(AstNodeIndex, node.rhs);
-        while (children.next()) |child_idx| {
+        var children = node.children(v.ast);
+        while (children.nextIdx()) |child_idx| {
             try v.validateStatement(child_idx);
         }
     }
@@ -309,7 +315,7 @@ test "SemanticValidator" {
     ;
 
     var stdout_buff: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buff);
+    var stdout_writer = std.fs.File.stderr().writer(&stdout_buff);
     const stdout = &stdout_writer.interface;
 
     const gpa = std.testing.allocator;
@@ -321,16 +327,27 @@ test "SemanticValidator" {
 
     var parser = try Parser.init(source, ts.tokens, gpa);
     defer parser.deinit();
-
     _ = try parser.parse();
-    std.debug.print("ast nodes: {}\n", .{parser.ast_nodes.items.len});
+    try parser.printAllNodesFlat(stdout);
+    try stdout.flush();
+
+    const snapshot = try parser.ast.takeSnapshot();
+    defer parser.ast.freeSnapshot(snapshot);
+
+    std.debug.print("ast nodes: {}\n", .{parser.ast.nodes.items.len});
 
     if (parser.errors.items.len > 0)
         try parser.printErrors(stdout, ts);
 
+    try parser.printAstBranch(stdout, parser.root_node, 1);
+    try stdout.flush();
+
     // validate shit:
     var validator = SemanticValidator.init(gpa, &parser);
     defer validator.deinit();
+
+    try std.testing.expect(parser.ast.equals(snapshot));
     try validator.validate();
     try validator.printErrors(stdout, ts);
+    try stdout.flush();
 }
