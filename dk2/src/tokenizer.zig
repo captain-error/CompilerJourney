@@ -35,6 +35,11 @@ pub const Token = struct {
         EQ,
         NOT_EQ,
 
+        AND,
+        OR,
+        XOR,
+        NOT,
+
         LPAREN,
         RPAREN,
 
@@ -210,6 +215,10 @@ pub const Tokenizer = struct {
             if (std.mem.eql(u8, "while", word)) return t.emit(.WHILE     , len);
             if (std.mem.eql(u8, "false", word)) return t.emit(.FALSE     , len);
             if (std.mem.eql(u8, "true" , word)) return t.emit(.TRUE      , len);
+            if (std.mem.eql(u8, "and"  , word)) return t.emit(.AND       , len);
+            if (std.mem.eql(u8, "or"   , word)) return t.emit(.OR        , len);
+            if (std.mem.eql(u8, "not"  , word)) return t.emit(.NOT       , len);
+            if (std.mem.eql(u8, "xor"  , word)) return t.emit(.XOR       , len);
                                                         return t.emit(.IDENTIFIER, len);
             // zig fmt: on
 

@@ -57,11 +57,11 @@ pub const AstNodeTag = enum(u8) {
     ASSIGNMENT, // 2 children: lhs, rhs
     BINARY_OP, // 2 children: lhs, rhs
     UNARY_OP, // 1 child
-    ATOM, // no child
     FNCALL, // N children for N params
-    IF, // 3 children: condition, then, else
     WHILE, // 2 children: condition
     BLOCK, // arbitrary many children
+    ATOM, // no child
+    IF, // 3 children: condition, then, else
 };
 
 pub const PrecedenceLevel = u8;
@@ -255,10 +255,13 @@ pub const Parser = struct {
 
     fn precedenceOf(p: *const Parser, token_index: TokenIndex) PrecedenceLevel {
         return switch (p.tokens[token_index].tag) {
-            .GT, .GE, .LT, .LE => 1,
-            .PLUS, .MINUS => 2,
-            .TIMES, .DIV => 3,
-            .POW => 4,
+            .OR => 1,
+            .XOR => 2,
+            .AND => 3,
+            .GT, .GE, .LT, .LE => 4,
+            .PLUS, .MINUS => 5,
+            .TIMES, .DIV => 6,
+            .POW => 7,
             else => 0,
         };
     }
@@ -358,15 +361,16 @@ pub const Parser = struct {
         // std.debug.print("parseExpression1: {} start: {s}\n", .{ min_precedence, @tagName(p.peek(0).tag) });
 
         var lhs: AstNodeIndex = undefined;
-        if (p.peek(0).tag == .MINUS) {
-            lhs = try p.ast.append(.{
-                .tag = .UNARY_OP,
-                .token_index = p.token_idx,
-            });
-            p.next();
-            p.ast.get(lhs).first_child = try p.parseSubExpr();
-        } else {
-            lhs = try p.parseSubExpr();
+        switch (p.peek(0).tag) {
+            .MINUS, .NOT => {
+                lhs = try p.ast.append(.{
+                    .tag = .UNARY_OP,
+                    .token_index = p.token_idx,
+                });
+                p.next();
+                p.ast.get(lhs).first_child = try p.parseSubExpr();
+            },
+            else => lhs = try p.parseSubExpr(),
         }
 
         while (true) {
@@ -680,7 +684,7 @@ pub const Parser = struct {
 
 fn testAstStructure(ast: *const AST) void {
     for (1..ast.nodes.items.len) |i| {
-        const idx: u32 = @intCast(i);
+        const idx: AstNodeIndex = @intCast(i);
         const node = ast.get(idx).*;
         const num_kids = ast.countChildrenOf(idx);
         switch (node.tag) {

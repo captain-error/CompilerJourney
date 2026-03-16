@@ -3,7 +3,7 @@ const meta = @import("meta.zig");
 
 const assert = std.debug.assert;
 
-pub const NodeIndex = u32;
+pub const NodeIndex = u31; // u31 to avoid accidental conversion of TokenIndex to this type
 
 pub fn GenericTree(Node: type) type {
     assert(meta.containsField(Node, "first_child"));
@@ -27,6 +27,10 @@ pub fn GenericTree(Node: type) type {
 
         pub fn deinit(t: *Tree) void {
             t.nodes.deinit(t.gpa);
+        }
+
+        pub fn nodeCount(t: *const Tree) usize {
+            return t.nodes.items.len;
         }
 
         pub fn takeSnapshot(t: *const Tree) ![]Node {
