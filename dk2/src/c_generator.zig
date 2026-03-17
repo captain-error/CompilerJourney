@@ -88,8 +88,13 @@ pub const CGenerator = struct {
 
     fn genHead(g: *const CGenerator) !void {
         try g.writer.writeAll(
+            \\#include <stdint.h>
             \\#include <math.h>
             \\#include <stdio.h>
+            \\
+            \\void print(double val) {
+            \\    printf("%f\n", val);
+            \\}
             \\
             \\int main(void) {
             \\
@@ -178,7 +183,7 @@ pub const CGenerator = struct {
         switch (node.tag) {
             .ATOM => try g.genAtom(node),
             .UNARY_OP => try g.genUnaryOp(node),
-            .FNCALL => try g.genFunCall(node),
+            .FNCALL => try g.genFunCallExpression(node),
             .BINARY_OP => try g.genBinaryOp(node, parent_precedence),
             else => unreachable,
         }
@@ -188,7 +193,7 @@ pub const CGenerator = struct {
         return try g.genExpression1(node_idx, 0);
     }
 
-    fn genFunCall(g: *CGenerator, node: *const AstNode) !void {
+    fn genFunCallExpression(g: *CGenerator, node: *const AstNode) !void {
 
         const token = g.ts.tokens[node.token_index];
         const fname = token.str(g.ts.source);
@@ -204,6 +209,13 @@ pub const CGenerator = struct {
             try g.genExpression(child_idx);
         }
         try g.writer.writeByte(')');
+    }
+
+    fn genFunCallStatement(g: *CGenerator, node_idx: AstNodeIndex) !void {
+        const node = g.ast.get(node_idx);
+        try g.genIndentation();
+        try g.genFunCallExpression(node);
+        try g.writer.writeAll(";\n");
     }
 
     fn genTypeName(g: *CGenerator, node_idx: AstNodeIndex) !void {
@@ -274,7 +286,7 @@ pub const CGenerator = struct {
         assert(cond_idx > 0);
 
         try g.genIndentation();
-        try g.writer.writeByte('(');
+        try g.writer.writeAll("while (");
         try g.genExpression(cond_idx);
         try g.writer.writeAll(")\n");
 
@@ -293,7 +305,7 @@ pub const CGenerator = struct {
         assert(cond_idx > 0);
 
         try g.genIndentation();
-        try g.writer.writeByte('(');
+        try g.writer.writeAll("if (");
         try g.genExpression(cond_idx);
         try g.writer.writeAll(")\n");
 
@@ -319,7 +331,11 @@ pub const CGenerator = struct {
             .ASSIGNMENT => try g.genAssignment(node_idx),
             .WHILE => try g.genWhile(node_idx),
             .IF => try g.genIf(node_idx),
-            else => unreachable,
+            .FNCALL => try g.genFunCallStatement(node_idx),
+            else => {
+                std.debug.print("INTERNAL ERROR: {} #{}\n", .{node.tag, node_idx});
+                unreachable;
+            },
         }
     }
 

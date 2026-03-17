@@ -86,14 +86,15 @@ pub fn main() !void {
 
     // try ts.prettyPrintTokens(stdout);
 
-    std.debug.print("tokens: {}\n", .{ts.tokens.len});
+    // std.debug.print("tokens: {}\n", .{ts.tokens.len});
 
     var parser = try Parser.init(source, ts.tokens, gpa);
     defer parser.deinit();
 
     _ = try parser.parse();
-    std.debug.print("ast nodes: {}\n", .{parser.ast.nodeCount()});
+    // std.debug.print("ast nodes: {}\n", .{parser.ast.nodeCount()});
     try parser.printAstBranch(stdout, parser.root_node, 1);
+    try stdout.flush();
 
     if (parser.hasErrors()) {
         try stdout.writeAll("There were errors in the parsing stage:\n");
@@ -115,6 +116,8 @@ pub fn main() !void {
         try ti.printErrors(stdout, ts);
         return;
     }
+    try typing.printAstBranchWithTypes(&parser, stdout, ti.node_types, parser.root_node, 1);
+    try stdout.flush();
 
     // open outfile:
     const outfile = std.fs.cwd().createFile(outpath, .{}) catch |err| {
