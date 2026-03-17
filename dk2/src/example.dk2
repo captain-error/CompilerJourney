@@ -1,0 +1,12 @@
+
+rate := 1.02
+years := 10
+i := 0
+
+money := 1000.0
+while i < years
+    money *= rate
+    i += 1
+end
+
+print(money)

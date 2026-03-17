@@ -1,0 +1,52 @@
+
++ Variables
++ Arithmetic Expressions
++ 3 Types: doubles (F64), int64 (Int), bool (Bool)
++ simple type inference: constants define type
++ simple control flow: if end, if else end, while end
++ builtin type conversion functions: round(F64) Int, floor(F64) Int, float(Int) F64 
+
+Syntax:
+
+x := -5.0 # declaring and assigning a variable
+x = 2.0  # assigning an existing variable
+b := false
+z := 42
+
+if b
+    x = -1.0
+else
+    local := 3.1
+    x += float(z)
+end
+
+local += 1.1 # should produce an error because "local" doesnt exist in this scope
+
+if x > 7.3
+    z -= 1
+end
+
+while z > 0
+    x *= 1.1
+    z -= 1
+end
+
+y := -x + -3 * - (-7 + -2) **-x + d
+z := x ** y; p := 7.1
+
+result := z + p**2
+
+newline is end of expression
+; is end of expression
+
+Operators:
+- (unary)
+**
+* /
++ -
+and
+or
+:= = *= /= += -=
+
+Program expects a variable "result" to be defined in the program and outputs its value at the end.
+
