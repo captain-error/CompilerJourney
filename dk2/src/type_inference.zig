@@ -27,7 +27,7 @@ const builtin_functions = [_]FunctionHead{
     .{ .name = "print", .return_type = .VOID, .param_count = 1, .param_types = [1]DkType{.ANY} ++ [1]DkType{.VOID} ** (MAX_NUM_FUNCTION_PARAMS - 1) },
 };
 
-const DkType = enum(u8) {
+pub const DkType = enum(u8) {
     UNKNOWN = 0,
     VOID,
     BOOL,
@@ -115,6 +115,9 @@ pub const TypeInferer = struct {
             ti.undeclared__[i] = .{};
         }
 
+        for(ti.node_types) |*nt|
+            nt.* = .UNKNOWN;
+
         return ti;
     }
 
@@ -125,6 +128,10 @@ pub const TypeInferer = struct {
         }
         ti.errors.deinit(ti.gpa);
         ti.gpa.free(ti.node_types);
+    }
+
+    pub fn hasErrors(ti: *const TypeInferer) bool {
+        return ti.errors.items.len > 0;
     }
 
     fn enterBlock(ti: *TypeInferer) void {
@@ -275,9 +282,10 @@ pub const TypeInferer = struct {
 
         // typecheck RHS:
         const rhs_type = try ti.evalTypeOf(var_node.next_sibling);
-
+        
         try ti.registerDeclaration(var_token_index, rhs_type);
 
+        ti.node_types[node.first_child] = rhs_type;
         return rhs_type;
     }
 
@@ -297,7 +305,7 @@ pub const TypeInferer = struct {
         const rhs_idx = var_node.next_sibling;
         assert(rhs_idx > 0);
 
-        return switch (op_token.tag) {
+        const rhs_type = switch (op_token.tag) {
             // zig fmt: off
             .PLUSASSIGN,
             .MINUSASSIGN,
@@ -307,6 +315,9 @@ pub const TypeInferer = struct {
             else          => unreachable,
             // zig fmt: on
         };
+
+        ti.node_types[node.first_child] = rhs_type;
+        return rhs_type;
     }
 
     fn typecheckAtom(ti: *TypeInferer, node_idx: AstNodeIndex) !DkType {
@@ -349,7 +360,7 @@ pub const TypeInferer = struct {
 
     fn typecheckIf(ti: *TypeInferer, node_idx: AstNodeIndex) !DkType {
         const node = ti.ast.get(node_idx);
-        assert(node.tag == .WHILE);
+        assert(node.tag == .IF);
 
         const cond_idx = node.first_child;
         assert(cond_idx > 0);
@@ -712,19 +723,63 @@ pub const TypeInferer = struct {
     }
 };
 
+pub fn printAstBranchWithTypes(p: *const Parser, writer: *std.Io.Writer, node_types : []DkType, ast_index: AstNodeIndex, indentation: usize) !void {
+    try writer.splatByteAll(' ', 4 * indentation);
+
+    if (ast_index == 0) {
+        try writer.writeAll("INVALID\n");
+        return;
+    }
+
+    const node_type = node_types[ast_index];
+
+    const node = p.ast.get(ast_index).*;
+    const token = p.tokens[node.token_index];
+
+    try writer.print("{s} ({s}[{s}]) :{s} #{} (next_sibling={})\n", .{
+        @tagName(node.tag),
+        @tagName(token.tag),
+        if (token.tag == .EOL) "" else token.str(p.source),
+        @tagName(node_type),
+        ast_index,
+        p.ast.get(ast_index).next_sibling,
+    });
+
+    if (node.hasChild()) {
+        var child_list = node.children(&p.ast);
+        while (child_list.nextIdx()) |child_idx|
+            try printAstBranchWithTypes(p, writer, node_types, child_idx, indentation + 1);
+    }
+}
+
 test "TypeInferer" {
+    // const source =
+    //     \\ x := -5.0 # declaring and assigning a variable
+    //     \\ x = 2.0  # assigning an existing variable
+    //     \\ d := 1
+    //     \\ y := -x + -3 * - (-7 + -2) **-x + d
+    //     \\ z := x ** y; p := 7.1
+    //     \\ result := z + p**2
+    // ;
+
     const source =
-        \\ x := -5.0 # declaring and assigning a variable
-        \\ x = 2.0  # assigning an existing variable
-        \\ d := 1
-        \\ y := -x + -3 * - (-7 + -2) **-x + d
-        \\ z := x ** y; p := 7.1
-        \\ result := z + p**2
+        \\ jahr := 0
+        \\ zins := 1.02
+        \\ result := 1.0
+        \\ while jahr < 10
+        \\      result *= zins
+        \\      jahr += 1
+        \\ end
+        \\ print(result)
     ;
 
     var stdout_buff: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stderr().writer(&stdout_buff);
     const stdout = &stdout_writer.interface;
+
+    try stdout.writeAll(source);
+    try stdout.writeByte('\n');
+    try stdout.flush();
 
     const gpa = std.testing.allocator;
 
@@ -736,8 +791,8 @@ test "TypeInferer" {
     var parser = try Parser.init(source, ts.tokens, gpa);
     defer parser.deinit();
     _ = try parser.parse();
-    try parser.printAllNodesFlat(stdout);
-    try stdout.flush();
+    // try parser.printAllNodesFlat(stdout);
+    // try stdout.flush();
 
     const snapshot = try parser.ast.takeSnapshot();
     defer parser.ast.freeSnapshot(snapshot);
@@ -747,8 +802,8 @@ test "TypeInferer" {
     if (parser.errors.items.len > 0)
         try parser.printErrors(stdout, ts);
 
-    try parser.printAstBranch(stdout, parser.root_node, 1);
-    try stdout.flush();
+    // try parser.printAstBranch(stdout, parser.root_node, 1);
+    // try stdout.flush();
 
     // validate shit:
     var ti = try TypeInferer.init(gpa, &parser);
@@ -758,4 +813,12 @@ test "TypeInferer" {
     try ti.checkAndReconstructTypes( parser.root_node);
     try ti.printErrors(stdout, ts);
     try stdout.flush();
+
+    try printAstBranchWithTypes(&parser, stdout, ti.node_types, parser.root_node, 1);
+    try stdout.flush();
+
+    // try stdout.writeAll("Variables: ");
+    // for(ti.declared_variables) |v| {
+
+    // }
 }

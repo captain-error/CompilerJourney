@@ -35,6 +35,12 @@ pub const Token = struct {
         EQ,
         NOT_EQ,
 
+        BW_NOT,
+        BW_AND,
+        BW_XOR,
+        BW_OR,
+        
+
         AND,
         OR,
         XOR,
