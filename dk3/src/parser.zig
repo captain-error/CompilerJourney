@@ -72,7 +72,6 @@ const ParserError = error{
     InternalCompilerError,
 };
 
-
 pub const Parser = struct {
     source: []const u8,
     tokens: []const Token,
@@ -459,7 +458,6 @@ pub const Parser = struct {
             p.next();
 
             else_idx = try p.parseIndentedBlock();
-
         }
 
         p.ast.get(node_idx).first_child = condition_idx;
@@ -560,8 +558,7 @@ pub const Parser = struct {
     }
 
     pub fn parse(p: *Parser) ParserError!AstNodeIndex {
-        
-        p.root_node = if(p.peek(0).tag==.BEGIN_BLOCK) try p.parseIndentedBlock() else try p.parseBlock();
+        p.root_node = if (p.peek(0).tag == .BEGIN_BLOCK) try p.parseIndentedBlock() else try p.parseBlock();
         return p.root_node;
     }
 
@@ -651,8 +648,329 @@ fn testAstStructure(ast: *const AST) void {
     }
 }
 
+// test "parse expression" {
+//     const source = "a < 2";
+//     try testParser(source, Parser.parseExpression, false);
+// }
+
+// test "parse expression 2" {
+//     const source = "(a < 2) * 6";
+//     try testParser(source, Parser.parseExpression, false);
+// }
+
+// test "parse expression 3" {
+//     const source = "(a < 2) * B + (2)";
+//     try testParser(source, Parser.parseExpression, false);
+// }
+
+// test "parse expression 4" {
+//     const source = "-a < 2";
+//     try testParser(source, Parser.parseExpression, false);
+// }
+
+// test "just arithmetic" {
+//     const source =
+//         \\ x := -5.0 # declaring and assigning a variable
+//         \\ x = 2.0  # assigning an existing variable
+//         \\ y := -x + -3 * - (-7 + -2) **-x
+//         \\ z := x ** y; p := 7.1
+//         \\ result := z + p**2
+//     ;
+
+//     try testParser(source, Parser.parseIndentedBlock, false);
+// }
+
+// test "simple while" {
+//     const source =
+//         \\while a
+//         \\  x += 2.0
+//         \\
+//     ;
+//     try testParser(source, Parser.parseWhile, false);
+// }
+
+// test "complex while" {
+//     const source =
+//         \\while a < 20
+//         \\   x += 2.0
+//         \\   b = 7
+//         \\
+//     ;
+//     try testParser(source, Parser.parseWhile, false);
+// }
+
+// test "if" {
+//     const source =
+//         \\if a
+//         \\  x += 2.0
+//     ;
+//     try testParser(source, Parser.parseIf, false);
+// }
+
+test "if else" {
+    const source =
+        \\if a
+        \\   x += 2.0
+        \\else
+        \\   x -= 5.1
+    ;
+    const expected = .{
+        AstNodeTag.IF, // if a
+        .{ AstNodeTag.ATOM, "a" }, // condition
+        .{ // then:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
+        },
+        .{ // else:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" } },
+        },
+    };
+    try testParser(source, Parser.parseIf, expected, false);
+}
+
+test "nested if else" {
+    const source =
+        \\if a
+        \\     if b < 2
+        \\         x += 2.0
+        \\     else
+        \\         x -= 1.2
+        \\
+        \\else
+        \\     if x > 7.1
+        \\         x -= 5.1
+    ;
+    const expected = .{
+        AstNodeTag.IF, // if a
+        .{ AstNodeTag.ATOM, "a" }, // condition
+        .{ // then:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.IF, // if b < 2
+                .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "2" } }, // condition
+                .{ // then:
+                    AstNodeTag.BLOCK,
+                    .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" }},
+                },
+            
+                .{ // else:
+                    AstNodeTag.BLOCK,
+                    .{AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "1.2" }},
+                },
+            },
+        },
+        .{ // else:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.IF, // if x > 7.1
+                .{ AstNodeTag.BINARY_OP, ">", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "7.1" } }, // condition
+                .{ // then:
+                    AstNodeTag.BLOCK,
+                    .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" }},
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseIf, expected, false);
+}
+
+test "parse function call" {
+    const source = "doStuff()";
+    const expected = .{ AstNodeTag.FNCALL, "doStuff" };
+    try testParser(source, Parser.parseFunCall, expected, false);
+}
+
+test "parse function call wit 1 param" {
+    const source = "doStuff(a)";
+    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{"a"} };
+    try testParser(source, Parser.parseFunCall, expected, false);
+}
+
+test "parse function call wit 1 param + trailing comma" {
+    const source = "doStuff(a,)";
+    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{"a"} };
+    try testParser(source, Parser.parseFunCall, expected, false);
+}
+
+test "parse function call wit 2 params" {
+    const source = "doStuff(a, b)";
+    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} };
+    try testParser(source, Parser.parseFunCall, expected, false);
+}
+
+test "parse function call wit 2 params + trailing comma" {
+    const source = "doStuff(a, b,)";
+    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} };
+    try testParser(source, Parser.parseFunCall, expected, false);
+}
+
+test "parse function with parser.parse()" {
+    const source = "doStuff(a, b,)";
+    const expected = .{AstNodeTag.BLOCK, .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} }};
+    try testParser(source, Parser.parse, expected, false);
+}
+
+test "parse complex program" {
+    const source =
+        \\ jahr := 0
+        \\ zins := 1.02
+        \\ result := 1.0
+        \\ while jahr < 10
+        \\      result *= zins
+        \\      jahr += 1
+        \\ 
+        \\ print(result)
+    ;
+    try testParser(source, Parser.parse, .{}, false);
+}
+
+test "AST vs reference" {
+    const src = "x := y + z";
+    // parse src, get the AST, and compare it to the expected structure:
+    const expected = .{
+        AstNodeTag.DECLARATION,
+        .{ AstNodeTag.ATOM, "x" },
+        .{
+            AstNodeTag.BINARY_OP,
+            "+",
+            .{ AstNodeTag.ATOM, "y" },
+            .{ AstNodeTag.ATOM, "z" },
+        },
+    };
+    try testParser(src, Parser.parserDeclOrAssign, expected, false);
+}
+
+/// Returns true if the passed type will coerce to []const u8.
+/// Any of the following are considered strings:
+/// ```
+/// []const u8, [:S]const u8, *const [N]u8, *const [N:S]u8,
+/// []u8, [:S]u8, *[:S]u8, *[N:S]u8.
+/// ```
+/// These types are not considered strings:
+/// ```
+/// u8, [N]u8, [*]const u8, [*:0]const u8,
+/// [*]const [N]u8, []const u16, []const i8,
+/// *const u8, ?[]const u8, ?*const [N]u8.
+/// ```
+pub fn isZigString(comptime T: type) bool {
+    return comptime blk: {
+        // Only pointer types can be strings, no optionals
+
+        const info = @typeInfo(T);
+        if (info != .pointer) break :blk false;
+
+        const ptr = &info.pointer;
+        // Check for CV qualifiers that would prevent coerction to []const u8
+
+        if (ptr.is_volatile or ptr.is_allowzero) break :blk false;
+
+        // If it's already a slice, simple check.
+
+        if (ptr.size == .slice) {
+            break :blk ptr.child == u8;
+        }
+
+        // Otherwise check if it's an array type that coerces to slice.
+
+        if (ptr.size == .one) {
+            const child = @typeInfo(ptr.child);
+            if (child == .array) {
+                const arr = &child.array;
+                break :blk arr.child == u8;
+            }
+        }
+
+        break :blk false;
+    };
+}
+
+fn expectAstStructure(
+    ast: *const AST,
+    ts: *const TokenStream,
+    writer: *std.Io.Writer,
+    ast_idx: AstNodeIndex,
+    nesting_depth: usize, // only used for error reporting
+    expected: anytype,
+) !void {
+    if (ast_idx == 0) {
+        try writer.splatByteAll(' ', nesting_depth * 4);
+        try writer.print("ast_idx is 0. Expected: {any}\n", .{expected});
+        return error.WrongNodeType;
+    }
+
+    if (expected.len == 0)
+        return; // nothing to expect, ignore everything.
+
+    const node = ast.get(ast_idx).*;
+    const token = ts.tokens[node.token_index];
+    var child_list = node.children(ast);
+
+    inline for (expected) |e| {
+        if (@TypeOf(e) == @TypeOf(null)) {
+            return; // ignore the rest, everything before matched!
+        } else if (@TypeOf(e) == AstNodeTag) {
+            if (node.tag != e) {
+                try writer.splatByteAll(' ', nesting_depth * 4);
+                try writer.print("expected AST node {s} but found {s} ({s}[{s}])\n", .{ @tagName(e), @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
+                return error.WrongNodeType;
+            }
+        } else if (@TypeOf(e) == Token.Tag) {
+            if (token.tag != e) {
+                try writer.splatByteAll(' ', nesting_depth * 4);
+                try writer.print("expected token {s} but found {s} ({s}[{s}])\n", .{ @tagName(e), @tagName(token.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
+                return error.WrongTokenTag;
+            }
+        } else {
+            const e_type_info = @typeInfo(@TypeOf(e));
+            switch (e_type_info) {
+                .array => unreachable,
+                .pointer => |p| {
+                    // @compileLog(e, p, p.child, @typeInfo(p.child));
+                    assert(p.size == .one);
+                    // @compileLog(e, p.child, @typeInfo(p.child));
+                    assert(@typeInfo(p.child) == .array);
+                    assert(@typeInfo(p.child).array.child == u8);
+                    const expected_token_str = e;
+                    if (!std.mem.eql(u8, token.str(ts.source), expected_token_str)) {
+                        try writer.splatByteAll(' ', nesting_depth * 4);
+                        try writer.print("expected token string {s} but found {s}\n", .{ expected_token_str, token.str(ts.source) });
+                        return error.StringMismatch;
+                    }
+                },
+                .@"struct" => {
+                    assert(e_type_info.@"struct".is_tuple);
+                    // recursively check child:
+                    const expected_child = e;
+                    if (child_list.nextIdx()) |child_idx| {
+                        expectAstStructure(ast, ts, writer, child_idx, nesting_depth + 1, expected_child) catch |err| {
+                            try writer.splatByteAll(' ', nesting_depth * 4);
+                            try writer.print("{s} ({s}[{s}]))\n", .{ @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
+                            return err;
+                        };
+                    } else {
+                        // report that expected child is missing.
+                        try writer.splatByteAll(' ', nesting_depth * 4);
+                        try writer.print("child missing. Expected: {any}\n", .{expected_child});
+                        return error.ChildMissing;
+                    }
+                },
+                else => unreachable,
+            } // switch e_type_info
+        }
+    } // for expected
+
+    if (child_list.nextIdx()) |extra_child_idx| {
+        // report that there are more children than expected.
+        try writer.splatByteAll(' ', nesting_depth * 4);
+        try writer.print("extra child found: AST idx: {}", .{extra_child_idx});
+        try writer.print("({s})\n", .{@tagName(ast.get(extra_child_idx).tag)});
+        return error.ExtraChild;
+    }
+
+    return; // everything matched!
+}
+
 // fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex
-fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void {
+fn testParser(source: []const u8, parse_func: anytype, expected_structure: anytype, print_always: bool) !void {
     const gpa = std.testing.allocator;
 
     var stdout_buff: [1024]u8 = undefined;
@@ -724,7 +1042,13 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
         }
     }
 
-    testAstStructure(&parser.ast);
+    // testAstStructure(&parser.ast);
+    expectAstStructure(&parser.ast, &ts, stdout, ast_idx, 0, expected_structure) catch |err| {
+        try stdout.writeAll("Writing complete AST because of non-matching structure:\n");
+        try parser.printAstBranch(stdout, ast_idx, 1);
+
+        return err;
+    };
 
     // try ts.prettyPrintTokens(stdout);
     // try stdout.writeAll("-----------------------\n\n");
@@ -740,135 +1064,7 @@ fn testParser(source: []const u8, parse_func: anytype, print_always: bool) !void
     //     try stdout.print("{s} ({s}[{s}]) ", .{ @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(source) });
     // }
     // try stdout.writeAll("\n---------------\n");
-}
-
-test "parse expression" {
-    const source = "a < 2";
-    try testParser(source, Parser.parseExpression, false);
-}
-
-test "parse expression 2" {
-    const source = "(a < 2) * 6";
-    try testParser(source, Parser.parseExpression, false);
-}
-
-test "parse expression 3" {
-    const source = "(a < 2) * B + (2)";
-    try testParser(source, Parser.parseExpression, false);
-}
-
-test "parse expression 4" {
-    const source = "-a < 2";
-    try testParser(source, Parser.parseExpression, false);
-}
-
-test "just arithmetic" {
-    const source =
-        \\ x := -5.0 # declaring and assigning a variable
-        \\ x = 2.0  # assigning an existing variable
-        \\ y := -x + -3 * - (-7 + -2) **-x
-        \\ z := x ** y; p := 7.1
-        \\ result := z + p**2
-    ;
-
-    try testParser(source, Parser.parseIndentedBlock, false);
-}
-
-test "simple while" {
-    const source =
-        \\while a
-        \\  x += 2.0
-        \\
-    ;
-    try testParser(source, Parser.parseWhile, false);
-}
-
-test "complex while" {
-    const source =
-        \\while a < 20
-        \\   x += 2.0
-        \\   b = 7
-        \\
-    ;
-    try testParser(source, Parser.parseWhile, false);
-}
-
-test "if" {
-    const source =
-        \\if a
-        \\  x += 2.0
-    ;
-    try testParser(source, Parser.parseIf, false);
-}
-
-test "if else" {
-    const source =
-        \\if a
-        \\   x += 2.0
-        \\else
-        \\   x -= 5.1
-
-    ;
-    try testParser(source, Parser.parseIf, false);
-}
-
-test "nested if else" {
-    const source =
-        \\if a
-        \\     if b < 2
-        \\         x += 2.0
-        \\     else
-        \\         x -= 1.2
-        \\
-        \\else
-        \\     if x > 7.1
-        \\         x -= 5.1
-    ;
-    try testParser(source, Parser.parseIf, false);
-}
-
-test "parse function call" {
-    const source = "doStuff()";
-    try testParser(source, Parser.parseFunCall, false);
-}
-
-test "parse function call wit 1 param" {
-    const source = "doStuff(a)";
-    try testParser(source, Parser.parseFunCall, false);
-}
-
-test "parse function call wit 1 param + trailing comma" {
-    const source = "doStuff(a,)";
-    try testParser(source, Parser.parseFunCall, false);
-}
-
-test "parse function call wit 2 params" {
-    const source = "doStuff(a, b)";
-    try testParser(source, Parser.parseFunCall, false);
-}
-
-test "parse function call wit 2 params + trailing comma" {
-    const source = "doStuff(a, b,)";
-    try testParser(source, Parser.parseFunCall, false);
-}
-
-test "parse function with parser.parse()" {
-    const source = "doStuff(a, b,)";
-    try testParser(source, Parser.parse, false);
-}
-
-test "parse complex program" {
-    const source =
-        \\ jahr := 0
-        \\ zins := 1.02
-        \\ result := 1.0
-        \\ while jahr < 10
-        \\      result *= zins
-        \\      jahr += 1
-        \\ 
-        \\ print(result)
-    ;
-    try testParser(source, Parser.parse, false);
+    try stdout.flush();
 }
 
 // test "Parser" {
