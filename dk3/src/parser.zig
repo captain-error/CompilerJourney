@@ -57,6 +57,9 @@ pub const AstNodeTag = enum(u8) {
     ASSIGNMENT, // 2 children: lhs, rhs
     BINARY_OP, // 2 children: lhs, rhs
     UNARY_OP, // 1 child
+    FNDECL, // 2 children: param list, body
+    FNPARAMS, // arbitrary many children
+    RETURN, // 1 child: return value (expression)
     FNCALL, // N children for N params
     WHILE, // 2 children: condition
     BLOCK, // arbitrary many children
@@ -255,6 +258,84 @@ pub const Parser = struct {
     //         .tag = .ATOM,
     //     });
     // }
+
+    pub fn parseFnDecl(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .FN);
+        p.next();
+
+        if (!try p.expectToken(.IDENTIFIER)) 
+            return error.UnexpectedToken;
+        
+        const name_token_idx = p.token_idx;
+        p.next();
+
+        if (!try p.expectToken(.LPAREN))
+             return error.UnexpectedToken;
+       
+
+        const node_idx = try p.ast.append(.{
+            .tag = .FNDECL,
+            .token_index = name_token_idx,
+        });
+    
+        const params_idx = try p.ast.append(.{
+            .tag = .FNPARAMS,
+            .token_index = p.token_idx, // not really needed, points to the opening parenthesis token
+        });
+        p.ast.get(node_idx).first_child = params_idx;
+
+        p.next();
+        var param_list = p.ast.startList();
+
+        while (p.peek(0).tag != .RPAREN) {
+            if (!try p.expectToken(.IDENTIFIER)) 
+                return error.UnexpectedToken;
+
+            const param_token_idx = p.token_idx;
+            try param_list.appendExisting(try p.ast.append(.{
+                .tag = .ATOM,
+                .token_index = param_token_idx,
+            }));
+            p.next();
+
+            if (p.peek(0).tag != .COMMA) break;
+            p.next();
+        }
+
+        if (!try p.expectToken(.RPAREN))
+            return error.UnexpectedToken;
+        p.next();
+
+        if (!try p.expectToken(.EOL))
+            return error.UnexpectedToken;
+        p.next();
+
+        const body_idx = try p.parseIndentedBlock();
+        const params_node = p.ast.get(params_idx);
+
+        params_node.first_child = param_list.start_index;
+        params_node.next_sibling = body_idx;
+
+        return node_idx;
+    }
+
+    pub fn parseReturn(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .RETURN);
+        const node_idx = try p.ast.append(.{
+            .tag = .RETURN,
+            .token_index = p.token_idx,
+        });
+        p.next();
+
+        const expr_idx = try p.parseExpression();
+        p.ast.get(node_idx).first_child = expr_idx;
+
+        if (!try p.expectEndOfStatement())
+            return error.UnexpectedToken;
+        p.next();
+
+        return node_idx;
+    }
 
     pub fn parseAtomOrFuncall(p: *Parser) InternalParserError!AstNodeIndex {
         // std.debug.print("parseAtomOrFuncall: start: {s}\n", .{@tagName(p.peek(0).tag)});
@@ -475,6 +556,7 @@ pub const Parser = struct {
             // zig fmt: off
             .IF         => res = p.parseIf(),
             .WHILE      => res = p.parseWhile(),
+            .RETURN     => res = p.parseReturn(),
             // zig fmt: on
             .IDENTIFIER => {
                 if (p.peek(1).tag == .LPAREN) {

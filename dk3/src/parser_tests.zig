@@ -15,7 +15,6 @@ const Parser = par.Parser;
 const AstNodeIndex = par.AstNodeIndex;
 const AstNodeTag = par.AstNodeTag;
 
-
 fn testAstStructure(ast: *const AST) void {
     for (1..ast.nodes.items.len) |i| {
         const idx: AstNodeIndex = @intCast(i);
@@ -33,9 +32,54 @@ fn testAstStructure(ast: *const AST) void {
             .UNARY_OP    => assert(num_kids == 1),
             .BLOCK       => {},
             .FNCALL      => {},
+            .FNPARAMS    => {},
+            .RETURN      => assert(num_kids == 1),
+            .FNDECL      => assert(num_kids == 2),
             // zig fmt: on
         }
     }
+}
+
+test "parse function declaration" {
+    const source =
+        \\fn getAnswer()
+        \\  return 42
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "getAnswer", .{AstNodeTag.FNPARAMS}, //
+        .{ AstNodeTag.BLOCK, .{
+            AstNodeTag.RETURN,
+            Token.Tag.RETURN,
+            "return",
+            .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "42" },
+        } },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
+test "parse function declaration 2" {
+    const source =
+        \\fn add(a, b)
+        \\  return a + b
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
+            .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+        },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
 }
 
 test "parse expression" {
