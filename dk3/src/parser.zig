@@ -648,64 +648,163 @@ fn testAstStructure(ast: *const AST) void {
     }
 }
 
-// test "parse expression" {
-//     const source = "a < 2";
-//     try testParser(source, Parser.parseExpression, false);
-// }
+test "parse expression" {
+    const source = "a < 2";
+    const expected = .{
+        AstNodeTag.BINARY_OP,                            Token.Tag.LT,                                 "<",
+        .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "2" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
 
-// test "parse expression 2" {
-//     const source = "(a < 2) * 6";
-//     try testParser(source, Parser.parseExpression, false);
-// }
+test "parse expression 2" {
+    const source = "(a < 2) * 6";
+    const expected = .{
+        AstNodeTag.BINARY_OP, Token.Tag.TIMES, "*",
+        .{ AstNodeTag.BINARY_OP, Token.Tag.LT, "<", .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "2" } }, // a < 2
+        .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "6" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
 
-// test "parse expression 3" {
-//     const source = "(a < 2) * B + (2)";
-//     try testParser(source, Parser.parseExpression, false);
-// }
+test "parse expression 3" {
+    const source = "(a < 2) * B + (2)";
+    const expected = .{
+        AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+        .{ // (a < 2) * B
+            AstNodeTag.BINARY_OP, Token.Tag.TIMES, "*",
+            .{ AstNodeTag.BINARY_OP, Token.Tag.LT, "<", .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "2" } }, // a < 2
+            .{ AstNodeTag.ATOM, "B" },
+        },
+        .{ AstNodeTag.ATOM, "2" }, // (2)
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
 
-// test "parse expression 4" {
-//     const source = "-a < 2";
-//     try testParser(source, Parser.parseExpression, false);
-// }
+test "parse expression 4" {
+    const source = "-a < 2";
+    const expected = .{
+        AstNodeTag.BINARY_OP, Token.Tag.LT, "<",
+        .{ AstNodeTag.UNARY_OP, Token.Tag.MINUS, "-", .{ AstNodeTag.ATOM, "a" } }, // -a
+        .{ AstNodeTag.ATOM, "2" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
 
-// test "just arithmetic" {
-//     const source =
-//         \\ x := -5.0 # declaring and assigning a variable
-//         \\ x = 2.0  # assigning an existing variable
-//         \\ y := -x + -3 * - (-7 + -2) **-x
-//         \\ z := x ** y; p := 7.1
-//         \\ result := z + p**2
-//     ;
+test "just arithmetic" {
+    const source =
+        \\ x := -5.0 # declaring and assigning a variable
+        \\ x = 2.0  # assigning an existing variable
+        \\ y := -x + -3 * - (-7 + -2) **-x
+        \\ z := x ** y; p := 7.1
+        \\ result := z + p**2
+    ;
+    const expected = .{
+        AstNodeTag.BLOCK, // whole block
+        .{ AstNodeTag.DECLARATION, Token.Tag.DECLARE, ":=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.UNARY_OP, Token.Tag.MINUS, "-", .{ AstNodeTag.ATOM, "5.0" } } }, // x := -5.0
+        .{ AstNodeTag.ASSIGNMENT, Token.Tag.ASSIGN, "=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } }, // x = 2.0
+        .{ // y := -x + -3 * - (-7 + -2) **-x
+            AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "y" }, //
+            .{
+                AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+", //
+                .{ AstNodeTag.UNARY_OP, "-", .{ AstNodeTag.ATOM, "x" } }, //
+                .{
+                    AstNodeTag.BINARY_OP, Token.Tag.TIMES, "*", //
+                    .{ AstNodeTag.UNARY_OP, Token.Tag.MINUS, "-", .{ AstNodeTag.ATOM, "3" } }, //
+                    .{
+                        AstNodeTag.BINARY_OP, Token.Tag.POW, "**", //
+                        .{
+                            AstNodeTag.UNARY_OP, Token.Tag.MINUS, "-", .{
+                                AstNodeTag.BINARY_OP,                                     Token.Tag.PLUS,                                           "+",
+                                .{ AstNodeTag.UNARY_OP, "-", .{ AstNodeTag.ATOM, "7" } }, .{ AstNodeTag.UNARY_OP, "-", .{ AstNodeTag.ATOM, "2" } },
+                            },
+                        },
+                        .{ AstNodeTag.UNARY_OP, "-", .{ AstNodeTag.ATOM, "x" } },
+                    },
+                },
+            },
+        },
+        .{
+            AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "z" }, //
+            .{
+                AstNodeTag.BINARY_OP,      Token.Tag.POW,             "**", //
+                .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "y" },
+            },
+        }, // z := x ** y
+        .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "p" }, .{ AstNodeTag.ATOM, "7.1" } }, // p := 7.1
+        .{
+            AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "result" }, //
+            .{
+                AstNodeTag.BINARY_OP,      Token.Tag.PLUS, "+", //
+                .{ AstNodeTag.ATOM, "z" },
+                .{
+                    AstNodeTag.BINARY_OP,      Token.Tag.POW,             "**", //
+                    .{ AstNodeTag.ATOM, "p" }, .{ AstNodeTag.ATOM, "2" },
+                },
+            },
+        }, // result := z + p**2
+    };
 
-//     try testParser(source, Parser.parseIndentedBlock, false);
-// }
+    try testParser(source, Parser.parseIndentedBlock, expected, false);
+}
 
-// test "simple while" {
-//     const source =
-//         \\while a
-//         \\  x += 2.0
-//         \\
-//     ;
-//     try testParser(source, Parser.parseWhile, false);
-// }
+test "simple while" {
+    const source =
+        \\while a
+        \\  x += 2.0
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.WHILE, // while a
+        .{ AstNodeTag.ATOM, "a" }, // condition
+        .{ // body:
+            AstNodeTag.BLOCK,
+            .{
+                AstNodeTag.ASSIGNMENT,
+                Token.Tag.PLUSASSIGN,
+                "+=",
+                .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "x" },
+                .{ AstNodeTag.ATOM, Token.Tag.FLOAT_LIT, "2.0" },
+            },
+        },
+    };
+    try testParser(source, Parser.parseWhile, expected, false);
+}
 
-// test "complex while" {
-//     const source =
-//         \\while a < 20
-//         \\   x += 2.0
-//         \\   b = 7
-//         \\
-//     ;
-//     try testParser(source, Parser.parseWhile, false);
-// }
+test "complex while" {
+    const source =
+        \\while a < 20
+        \\   x += 2.0
+        \\   b = 7
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.WHILE, // while a < 20
+        .{ AstNodeTag.BINARY_OP, Token.Tag.LT, "<", .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "20" } }, // condition
+        .{ // body:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.ASSIGNMENT, Token.Tag.PLUSASSIGN, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
+            .{ AstNodeTag.ASSIGNMENT, Token.Tag.ASSIGN, "=", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "7" } },
+        },
+    };
+    try testParser(source, Parser.parseWhile, expected, false);
+}
 
-// test "if" {
-//     const source =
-//         \\if a
-//         \\  x += 2.0
-//     ;
-//     try testParser(source, Parser.parseIf, false);
-// }
+test "if" {
+    const source =
+        \\if a
+        \\  x += 2.0
+    ;
+    const expected = .{
+        AstNodeTag.IF, // if a
+        .{ AstNodeTag.ATOM, "a" }, // condition
+        .{ // then:
+            AstNodeTag.BLOCK,
+            .{ AstNodeTag.ASSIGNMENT, Token.Tag.PLUSASSIGN, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
+        },
+    };
+    try testParser(source, Parser.parseIf, expected, false);
+}
 
 test "if else" {
     const source =
@@ -719,11 +818,11 @@ test "if else" {
         .{ AstNodeTag.ATOM, "a" }, // condition
         .{ // then:
             AstNodeTag.BLOCK,
-            .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
+            .{ AstNodeTag.ASSIGNMENT, Token.Tag.PLUSASSIGN, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
         },
         .{ // else:
             AstNodeTag.BLOCK,
-            .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" } },
+            .{ AstNodeTag.ASSIGNMENT, Token.Tag.MINUSASSIGN, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" } },
         },
     };
     try testParser(source, Parser.parseIf, expected, false);
@@ -746,26 +845,27 @@ test "nested if else" {
         .{ AstNodeTag.ATOM, "a" }, // condition
         .{ // then:
             AstNodeTag.BLOCK,
-            .{ AstNodeTag.IF, // if b < 2
-                .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "2" } }, // condition
+            .{
+                AstNodeTag.IF, // if b < 2
+                .{ AstNodeTag.BINARY_OP, Token.Tag.LT, "<", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "2" } }, // condition
                 .{ // then:
                     AstNodeTag.BLOCK,
-                    .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" }},
+                    .{ AstNodeTag.ASSIGNMENT, Token.Tag.PLUSASSIGN, "+=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "2.0" } },
                 },
-            
                 .{ // else:
                     AstNodeTag.BLOCK,
-                    .{AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "1.2" }},
+                    .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "1.2" } },
                 },
             },
         },
         .{ // else:
             AstNodeTag.BLOCK,
-            .{ AstNodeTag.IF, // if x > 7.1
+            .{
+                AstNodeTag.IF, // if x > 7.1
                 .{ AstNodeTag.BINARY_OP, ">", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "7.1" } }, // condition
                 .{ // then:
                     AstNodeTag.BLOCK,
-                    .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" }},
+                    .{ AstNodeTag.ASSIGNMENT, "-=", .{ AstNodeTag.ATOM, "x" }, .{ AstNodeTag.ATOM, "5.1" } },
                 },
             },
         },
@@ -781,7 +881,7 @@ test "parse function call" {
 
 test "parse function call wit 1 param" {
     const source = "doStuff(a)";
-    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{"a"} };
+    const expected = .{ AstNodeTag.FNCALL, "doStuff", .{ AstNodeTag.ATOM, "a" } };
     try testParser(source, Parser.parseFunCall, expected, false);
 }
 
@@ -805,7 +905,7 @@ test "parse function call wit 2 params + trailing comma" {
 
 test "parse function with parser.parse()" {
     const source = "doStuff(a, b,)";
-    const expected = .{AstNodeTag.BLOCK, .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} }};
+    const expected = .{ AstNodeTag.BLOCK, .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} } };
     try testParser(source, Parser.parse, expected, false);
 }
 

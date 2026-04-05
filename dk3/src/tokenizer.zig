@@ -519,7 +519,7 @@ test "Tokenizer" {
     t = tokenizer.next(); try expect(t.tag == .IDENTIFIER ); try expEql(t.str(source), "z"     );
     t = tokenizer.next(); try expect(t.tag == .PLUS       ); try expEql(t.str(source), "+"     );
     t = tokenizer.next(); try expect(t.tag == .IDENTIFIER ); try expEql(t.str(source), "p"     );   
-    t = tokenizer.next(); try expect(t.tag == .EOL        ); try expEql(t.str(source), ""    );
+    t = tokenizer.next(); try expect(t.tag == .EOL        ); try expEql(t.str(source), ""     );
     t = tokenizer.next(); try expect(t.tag == .END_BLOCK  ); try expEql(t.str(source), ""      );
     t = tokenizer.next(); try expect(t.tag == .EOF        ); try expEql(t.str(source), ""      );
     // zig fmt: on
