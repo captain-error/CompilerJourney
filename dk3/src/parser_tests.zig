@@ -179,7 +179,7 @@ test "just arithmetic" {
         }, // result := z + p**2
     };
 
-    try testParser(source, Parser.parseIndentedBlock, expected, false);
+    try testParser(source, Parser.parseIndentedCodeBlock, expected, false);
 }
 
 test "simple while" {
@@ -337,24 +337,39 @@ test "parse function call wit 2 params + trailing comma" {
     try testParser(source, Parser.parseFunCall, expected, false);
 }
 
-test "parse function with parser.parse()" {
-    const source = "doStuff(a, b,)";
-    const expected = .{ AstNodeTag.BLOCK, .{ AstNodeTag.FNCALL, "doStuff", .{"a"}, .{"b"} } };
-    try testParser(source, Parser.parse, expected, false);
-}
-
 test "parse complex program" {
     const source =
-        \\ jahr := 0
-        \\ zins := 1.02
-        \\ result := 1.0
-        \\ while jahr < 10
-        \\      result *= zins
-        \\      jahr += 1
-        \\ 
-        \\ print(result)
+        \\fn main()
+        \\    jahr := 0
+        \\    zins := 1.02
+        \\    result := 1.0
+        \\    while jahr < 10
+        \\         result *= zins
+        \\         jahr += 1
+        \\    
+        \\    print(result)
     ;
-    try testParser(source, Parser.parse, .{}, false);
+    const expected = .{
+        AstNodeTag.BLOCK, .{
+            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
+                AstNodeTag.BLOCK,
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "0" } },
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "zins" }, .{ AstNodeTag.ATOM, "1.02" } },
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "1.0" } },
+                .{
+                    AstNodeTag.WHILE,
+                    .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "10" } },
+                    .{
+                        AstNodeTag.BLOCK,
+                        .{ AstNodeTag.ASSIGNMENT, "*=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "zins" } },
+                        .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "1" } },
+                    },
+                },
+                .{ AstNodeTag.FNCALL, "print", .{ AstNodeTag.ATOM, "result" } },
+            },
+        },
+    };
+    try testParser(source, Parser.parse, expected, false);
 }
 
 test "AST vs reference" {

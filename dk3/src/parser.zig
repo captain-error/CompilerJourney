@@ -310,7 +310,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         p.next();
 
-        const body_idx = try p.parseIndentedBlock();
+        const body_idx = try p.parseIndentedCodeBlock();
         const params_node = p.ast.get(params_idx);
 
         params_node.first_child = param_list.start_index;
@@ -510,7 +510,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         p.next();
 
-        const body_idx = try p.parseIndentedBlock();
+        const body_idx = try p.parseIndentedCodeBlock();
 
         p.ast.get(node_idx).first_child = condition_idx;
         p.ast.get(condition_idx).next_sibling = body_idx;
@@ -529,7 +529,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         p.next();
 
-        const then_idx = try p.parseIndentedBlock();
+        const then_idx = try p.parseIndentedCodeBlock();
 
         var else_idx: AstNodeIndex = 0;
         if (p.peek(0).tag == .ELSE) {
@@ -538,7 +538,7 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             p.next();
 
-            else_idx = try p.parseIndentedBlock();
+            else_idx = try p.parseIndentedCodeBlock();
         }
 
         p.ast.get(node_idx).first_child = condition_idx;
@@ -588,7 +588,7 @@ pub const Parser = struct {
         };
     }
 
-    pub fn parseIndentedBlock(p: *Parser) ParserError!AstNodeIndex {
+    pub fn parseIndentedCodeBlock(p: *Parser) ParserError!AstNodeIndex {
         if (!try p.expectToken(.BEGIN_BLOCK))
             return try p.ast.append(.{
                 .token_index = p.token_idx,
@@ -596,7 +596,7 @@ pub const Parser = struct {
             }); // empty block
         p.next();
 
-        const block_idx = try p.parseBlock();
+        const block_idx = try p.parseCodeBlock();
 
         if (!try p.expectToken(.END_BLOCK))
             return block_idx; // continue parsing despite error
@@ -606,7 +606,7 @@ pub const Parser = struct {
     }
 
     // does not consume .BEGIN_BLOCK and .END_BLOCK!
-    pub fn parseBlock(p: *Parser) ParserError!AstNodeIndex {
+    pub fn parseCodeBlock(p: *Parser) ParserError!AstNodeIndex {
         assert(p.peek(0).tag != .BEGIN_BLOCK);
 
         const token_idx = p.token_idx;
@@ -639,8 +639,46 @@ pub const Parser = struct {
         return block_node_idx;
     }
 
+    // does not consume .BEGIN_BLOCK and .END_BLOCK!
+    pub fn parseDeclBlock(p: *Parser) ParserError!AstNodeIndex {
+        assert(p.peek(0).tag != .BEGIN_BLOCK);
+
+        const token_idx = p.token_idx;
+        const block_node_idx = try p.ast.append(.{
+            .token_index = token_idx,
+            .tag = .BLOCK,
+        });
+
+        var child_list = p.ast.startList();
+
+        loop: while (true) {
+            const token = p.peek(0);
+            // std.debug.print("#### {} {s}[{s}]\n", .{ p.token_idx, @tagName(token.tag), token.str(p.source) });
+            switch (token.tag) {
+                // zig fmt: off
+                .END_BLOCK, .EOF => break :loop,
+                .EOL, .SEMICOLON  => p.next(), // ignore
+                .FN => {
+                    const node_idx = try p.advanceTillEoStatementOnErr(p.parseFnDecl());
+                    try child_list.appendExisting(node_idx);
+                },
+                else => {
+                    // std.debug.print("token.tag={}\n", .{ @tagName(token.tag) });
+                    try p.emitError(p.token_idx, "function declaration");
+                    p.advanceTillEoStatement();
+                },
+                // zig fmt: on
+
+            } // switch token
+        }
+
+        p.ast.get(block_node_idx).first_child = child_list.start_index;
+        return block_node_idx;
+    }
+
     pub fn parse(p: *Parser) ParserError!AstNodeIndex {
-        p.root_node = if (p.peek(0).tag == .BEGIN_BLOCK) try p.parseIndentedBlock() else try p.parseBlock();
+        // p.root_node = if (p.peek(0).tag == .BEGIN_BLOCK) try p.parseIndentedCodeBlock() else try p.parseCodeBlock();
+        p.root_node = try p.parseDeclBlock();
         return p.root_node;
     }
 
