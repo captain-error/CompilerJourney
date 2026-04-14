@@ -82,6 +82,42 @@ test "parse function declaration 2" {
     try testParser(source, Parser.parseFnDecl, expected, false);
 }
 
+test "parse mini program" {
+        const source =
+        \\fn main()
+        \\    jahr := 0
+        \\    zins := 1.02
+        \\    result := 1.0
+        \\    while jahr < 10
+        \\         result *= zins
+        \\         jahr += 1
+        \\    
+        \\    print(result)
+    ;
+
+    const expected = .{
+        AstNodeTag.BLOCK, .{
+            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
+                AstNodeTag.BLOCK,
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "0" } },
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "zins" }, .{ AstNodeTag.ATOM, "1.02" } },
+                .{ AstNodeTag.DECLARATION, ":=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "1.0" } },
+                .{
+                    AstNodeTag.WHILE,
+                    .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "10" } },
+                    .{
+                        AstNodeTag.BLOCK,
+                        .{ AstNodeTag.ASSIGNMENT, "*=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "zins" } },
+                        .{ AstNodeTag.ASSIGNMENT, "+=", .{ AstNodeTag.ATOM, "jahr" }, .{ AstNodeTag.ATOM, "1" } },
+                    },
+                },
+                .{ AstNodeTag.FNCALL, "print", .{ AstNodeTag.ATOM, "result" } },
+            },
+        },
+    };
+    try testParser(source, Parser.parse, expected, false);
+}
+
 test "parse expression" {
     const source = "a < 2";
     const expected = .{
