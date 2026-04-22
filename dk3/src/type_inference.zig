@@ -107,10 +107,10 @@ const FunctionInstancePseudoKey = struct {
 };
 
 const FunctionInstanceHashContext = struct {
-    types: *const Types,
+    types: *Types, // needed to resolve the type enums in the keys to actual types for hashing and equality checks
 
     fn combineHash(h: u64, t: DkType) u64 {
-        return h ^ (@as(u64, @intFromEnum(t)) + 0x9e3779b9 + (h << 6) + (h >> 2)); // from boost's hash_combine function
+        return h ^ (@as(u64, @intFromEnum(t)) +% 0x9e3779b9 +% (h << 6) +% (h >> 2)); // from boost's hash_combine function
     }
 
     fn hashFunctionInstanceKey(ctx: FunctionInstanceHashContext, key: FunctionInstanceKey) u64 {
@@ -134,15 +134,16 @@ const FunctionInstanceHashContext = struct {
         return h;
     }
 
-    pub fn hash(ctx: FunctionInstanceHashContext, key: anytype) u64 {
-        switch (@TypeOf(key)) {
-            FunctionInstanceKey => return ctx.hashFunctionInstanceKey(key),
-            FunctionInstancePseudoKey => return ctx.hashFunctionInstancePseudoKey(key),
+    pub fn hash(ctx: FunctionInstanceHashContext, key: anytype) u32 {
+        return @intCast(0xffffffff & switch (@TypeOf(key)) {
+            FunctionInstanceKey => ctx.hashFunctionInstanceKey(key),
+            FunctionInstancePseudoKey => ctx.hashFunctionInstancePseudoKey(key),
             else => unreachable,
-        }
+        });
     }
 
-    pub fn eql(ctx: FunctionInstanceHashContext, a: anytype, b: FunctionInstanceKey) bool {
+    pub fn eql(ctx: FunctionInstanceHashContext, a: anytype, b: FunctionInstanceKey, index : usize) bool {
+        _ = index;
         switch (@TypeOf(a)) {
             FunctionInstanceKey => return ctx.eqlKey(a, b),
             FunctionInstancePseudoKey => return ctx.eqlPseudoKey(a, b),
@@ -182,65 +183,77 @@ const FunctionInstanceHashContext = struct {
 };
 
 const FunctionInstances = struct {
-    hash_map: std.hash_map.HashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext, 75),
-    ctx: FunctionInstanceHashContext,
+    // hash_map: std.hash_map.HashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext, 75),
+    hash_map: HashMap,
     gpa: std.mem.Allocator,
+    param_types: Types,
 
-    pub fn init(ctx: FunctionInstanceHashContext, gpa: std.mem.Allocator) !FunctionInstances {
+    const HashMap = std.ArrayHashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext,true);
+    const Index = usize;
+
+    const CTX = FunctionInstanceHashContext;
+
+    pub fn init( gpa: std.mem.Allocator) !FunctionInstances {
         return FunctionInstances{
             .hash_map = .empty,
-            .ctx = ctx,
             .gpa = gpa,
+            .param_types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
         };
     }
 
     pub fn deinit(self: *FunctionInstances) void {
         self.hash_map.deinit(self.gpa);
+        self.param_types.deinit();
     }
 
     pub fn getPtr(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?*const FunctionInstance {
-        return self.hash_map.getPtrAdapted(key, self.ctx);
+        return self.hash_map.getPtrAdapted(key, CTX{.types=&self.param_types});
     }
 
     pub fn get(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?FunctionInstance {
-        return self.hash_map.getAdapted(key, self.ctx);
+        return self.hash_map.getAdapted(key, CTX{.types=&self.param_types});
+    }
+
+    pub fn getByIndex(self: *const FunctionInstances, index: Index) FunctionInstance {
+        return self.hash_map.entries.get(index).value;
     }
 
     pub fn contains(self: *FunctionInstances, key: FunctionInstancePseudoKey) bool {
-        return self.hash_map.containsAdapted(key, self.ctx);
+        return self.hash_map.containsAdapted(key, CTX{.types=&self.param_types});
     }
 
-    pub fn put(self: *FunctionInstances, key: FunctionInstanceKey, value: FunctionInstance) !*FunctionInstance {
-        const res = try self.hash_map.getOrPutContextAdapted(self.gpa, key, self.ctx, self.ctx);
+    pub fn put(self: *FunctionInstances, key: FunctionInstanceKey, value: FunctionInstance) !HashMap.GetOrPutResult {
+        const res = try self.hash_map.getOrPutContextAdapted(self.gpa, key, CTX{.types=&self.param_types}, CTX{.types=&self.param_types});
         assert(!res.found_existing);
         res.value_ptr.* = value;
-        return res.value_ptr;
+        return res;
     }
 };
+const FunctionInstanceIndex = FunctionInstances.Index;
 
 const FunctionInfos = struct {
     templates: FunctionTemplates,
     params: FunctionParams,
     instances: FunctionInstances,
-    instance_param_types: Types,
+    // instance_param_types: Types,
 
     pub fn init(gpa: std.mem.Allocator) !FunctionInfos {
-        var res = FunctionInfos{
+        return FunctionInfos{
             .templates = try .initWithNullElement(gpa, 32, FunctionTemplate.null_element),
             .params = try .init(gpa, 128),
-            .instances = undefined,
-            .instance_param_types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
+            .instances = try .init(gpa),
         };
-
-        res.instances = try .init(FunctionInstanceHashContext{ .types = &res.instance_param_types }, gpa);
-        return res;
     }
 
     pub fn deinit(self: *FunctionInfos) void {
         self.templates.deinit();
         self.params.deinit();
         self.instances.deinit();
-        self.instance_param_types.deinit();
+    }
+
+    pub fn paramTypesOfInstance(self: *const FunctionInfos, instance: FunctionInstance) []const DkType {
+        assert(instance.first_param_type_idx != .NONE);
+        return self.instances.param_types.slice(instance.first_param_type_idx, instance.param_count);
     }
 };
 
@@ -373,10 +386,15 @@ const SymbolTableStack = struct {
 pub const TypeInferer = struct {
     source: []const u8,
     tokens: []const Token,
+    ts : TokenStream,
     ast: *const AST,
     // node_types: []DkType, // types for each node in the ast
     root_index: AstNodeIndex,
     gpa: std.mem.Allocator,
+
+    // for error reporting:
+    fn_instantiation_stack: std.ArrayList(FunctionInstances.Index) = .empty,
+    fn_instantiation_ast_idx_stack: std.ArrayList(AstNodeIndex) = .empty, 
 
     // types: Types,
     finfo: FunctionInfos,
@@ -390,9 +408,22 @@ pub const TypeInferer = struct {
     // nesting_level: usize = 0,
     // declared_variables: std.hash_map.StringHashMapUnmanaged(TokenIndex),
     // undeclared_variables: std.hash_map.StringHashMapUnmanaged(TokenIndex),
-    errors: std.ArrayList(Error) = .empty,
+    errors: std.ArrayList(ErrorInfo) = .empty,
 
     const MAX_NESTING_LEVEL = 16;
+
+    pub const ErrorInfo = struct {
+        error_: Error,
+        fn_instantiation_stack_top: [16]InstantiationInfo, // in reversed order! i.e. the current function instantiation is at index 0, its caller at index 1, etc.
+        fn_instantiation_stack_len: usize,
+
+        const InstantiationInfo = struct {
+            function: FunctionInstances.Index,
+            fn_call_ast_idx: AstNodeIndex,
+        };
+
+        const MAX_FN_INSANTIATION_REPORT_DEPTH = 16;
+    };
 
     pub const Error = union(enum) {
         undecl_var: TokenIndex,
@@ -471,12 +502,14 @@ pub const TypeInferer = struct {
 
     pub fn init(
         gpa: std.mem.Allocator,
+        ts : TokenStream,
         parser: *const Parser,
     ) !TypeInferer {
         var ti = TypeInferer{
             .source = parser.source,
             .tokens = parser.tokens,
             .ast = &parser.ast,
+            .ts = ts,
             // .node_types = try gpa.alloc(DkType, parser.ast.nodeCount()),
             .root_index = parser.root_node,
             .gpa = gpa,
@@ -485,7 +518,7 @@ pub const TypeInferer = struct {
         };
 
         ti.finfo = try FunctionInfos.init(gpa);
-
+        try ti.fn_instantiation_stack.ensureTotalCapacity(gpa, 64);
         // for(ti.node_types) |*nt|
         //     nt.* = .UNKNOWN;
 
@@ -497,11 +530,34 @@ pub const TypeInferer = struct {
         ti.errors.deinit(ti.gpa);
         ti.global_symbol_table.deinit(ti.gpa);
         ti.symbol_table_pool.deinit();
-        // ti.gpa.free(ti.node_types);
+        ti.fn_instantiation_stack.deinit(ti.gpa);
+        ti.fn_instantiation_ast_idx_stack.deinit(ti.gpa);
     }
 
     pub fn hasErrors(ti: *const TypeInferer) bool {
         return ti.errors.items.len > 0;
+    }
+
+    fn addError(ti: *TypeInferer, error_: Error) !void {
+        // const stack_depth = ti.fn_instantiation_stack.items.len;
+        // const start = if(stack_depth <= ErrorInfo.MAX_FN_INSANTIATION_REPORT_DEPTH) 0 else (stack_depth - ErrorInfo.MAX_FN_INSANTIATION_REPORT_DEPTH);
+        const len = @min(ti.fn_instantiation_stack.items.len, ErrorInfo.MAX_FN_INSANTIATION_REPORT_DEPTH);
+        var error_info = ErrorInfo{
+            .error_ = error_,
+            .fn_instantiation_stack_top = undefined,
+            .fn_instantiation_stack_len = len,
+        };
+        for (0..len) |i| {
+            const idx1  = @as(i32, @intCast(ti.fn_instantiation_stack.items.len        )) - @as(i32, @intCast(1 + i));
+            const idx2  = @as(i32, @intCast(ti.fn_instantiation_ast_idx_stack.items.len)) - @as(i32, @intCast(i));
+
+            error_info.fn_instantiation_stack_top[i] = .{ 
+                .function = ti.fn_instantiation_stack.items[@intCast(idx1)], 
+                .fn_call_ast_idx = if(idx2 <  ti.fn_instantiation_ast_idx_stack.items.len) ti.fn_instantiation_ast_idx_stack.items[@intCast(idx2)] else 0,
+            };
+        }
+
+        try ti.errors.append(ti.gpa, error_info);
     }
 
     fn typecheckSameType(ti: *TypeInferer, op_index: AstNodeIndex, lhs: AstNodeIndex, rhs: AstNodeIndex, symbol_table_stack: *SymbolTableStack) !DkType {
@@ -512,7 +568,7 @@ pub const TypeInferer = struct {
             return .ERROR; // this error is a folowup error so we do not report it.
 
         if (lhs_type != rhs_type or lhs_type == .UNKNOWN) {
-            try ti.errors.append(ti.gpa, .{ .type_mismatch = .{ .ast_node = op_index, .lhs = lhs_type, .rhs = rhs_type } });
+            try ti.addError(.{ .type_mismatch = .{ .ast_node = op_index, .lhs = lhs_type, .rhs = rhs_type } });
             return .ERROR;
         }
 
@@ -528,11 +584,11 @@ pub const TypeInferer = struct {
 
         var err_occured = false;
         if (lhs_type != .INT and lhs_type != .FLOAT) {
-            try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = lhs, .actual = lhs_type, .expected = "LHS must be of number type" } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = lhs, .actual = lhs_type, .expected = "LHS must be of number type" } });
             err_occured = true;
         }
         if (rhs_type != .INT and rhs_type != .FLOAT) {
-            try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = rhs, .actual = rhs_type, .expected = "RHS must be of number type" } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = rhs, .actual = rhs_type, .expected = "RHS must be of number type" } });
             err_occured = true;
         }
 
@@ -540,7 +596,7 @@ pub const TypeInferer = struct {
             return .ERROR;
 
         if (lhs_type != rhs_type or lhs_type == .UNKNOWN) {
-            try ti.errors.append(ti.gpa, .{ .type_mismatch = .{ .ast_node = op_idx, .lhs = lhs_type, .rhs = rhs_type } });
+            try ti.addError(.{ .type_mismatch = .{ .ast_node = op_idx, .lhs = lhs_type, .rhs = rhs_type } });
             return .ERROR;
         }
 
@@ -556,11 +612,11 @@ pub const TypeInferer = struct {
 
         var err_occured = false;
         if (lhs_type != .BOOL) {
-            try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = lhs, .actual = lhs_type, .expected = "LHS must be a boolean" } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = lhs, .actual = lhs_type, .expected = "LHS must be a boolean" } });
             err_occured = true;
         }
         if (rhs_type != .BOOL) {
-            try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = rhs, .actual = rhs_type, .expected = "RHS must be a boolean" } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = rhs, .actual = rhs_type, .expected = "RHS must be a boolean" } });
             err_occured = true;
         }
 
@@ -598,7 +654,7 @@ pub const TypeInferer = struct {
                 .ERROR => return .ERROR,
                 .BOOL => return .BOOL,
                 else => {
-                    try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = child_idx, .actual = child_type, .expected = "Child expression must be a boolean" } });
+                    try ti.addError(.{ .wrong_type = .{ .ast_node = child_idx, .actual = child_type, .expected = "Child expression must be a boolean" } });
                     return .ERROR;
                 },
             },
@@ -606,7 +662,7 @@ pub const TypeInferer = struct {
                 .ERROR => return .ERROR,
                 .INT, .FLOAT => return child_type,
                 else => {
-                    try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = child_idx, .actual = child_type, .expected = "Child expression must be a number" } });
+                    try ti.addError(.{ .wrong_type = .{ .ast_node = child_idx, .actual = child_type, .expected = "Child expression must be a number" } });
                     return .ERROR;
                 },
             },
@@ -615,8 +671,11 @@ pub const TypeInferer = struct {
     }
 
     fn expectType(ti: *TypeInferer, node_idx: AstNodeIndex, actual: DkType, comptime expected: DkType) !void {
+        if (actual == .ERROR)
+            return; // this error is a folowup error so we do not report it.    
+
         if (actual != expected)
-            try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = node_idx, .actual = actual, .expected = "must be of type " ++ @tagName(expected) } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = node_idx, .actual = actual, .expected = "must be of type " ++ @tagName(expected) } });
 
         return;
     }
@@ -660,13 +719,13 @@ pub const TypeInferer = struct {
         assert(rhs_idx > 0);
 
         const symbol = symbol_table_stack.getMutablePtr(varname) orelse {
-            try ti.errors.append(ti.gpa, .{ .undecl_var = var_token_index });
+            try ti.addError(.{ .undecl_var = var_token_index });
             return .ERROR;
         };
 
         switch (symbol.kind) {
             .fn_param => {
-                try ti.errors.append(ti.gpa, .{ .fn_params_are_immutable = .{ .declaration = symbol.declaration, .usage = var_token_index } });
+                try ti.addError(.{ .fn_params_are_immutable = .{ .declaration = symbol.declaration, .usage = var_token_index } });
                 return .ERROR;
             },
             .variable => {
@@ -689,8 +748,8 @@ pub const TypeInferer = struct {
                 if (result_type == .UNKNOWN) {
                     // this is the first assignment to the result variable, so we can set its type now:
                     symbol.kind = .{ .result_variable = rhs_type };
-                } else if (result_type != rhs_type) {
-                    try ti.errors.append(ti.gpa, .{ .result_type_mismatch = .{ .ast_node = op_idx, .lhs = result_type, .rhs = rhs_type } });
+                } else if (result_type != rhs_type and rhs_type != .ERROR) {
+                    try ti.addError(.{ .result_type_mismatch = .{ .ast_node = op_idx, .lhs = result_type, .rhs = rhs_type } });
                     return .ERROR;
                 }
                 return rhs_type;
@@ -699,7 +758,7 @@ pub const TypeInferer = struct {
                 assert(fn_template_idx != .NONE);
                 const fn_template = ti.finfo.templates.get(fn_template_idx);
                 const token_idx = ti.ast.get(fn_template.ast_idx).token_index;
-                try ti.errors.append(ti.gpa, .{ .symbol_is_not_a_variable_but_function = .{ .declaration = token_idx, .usage = lhs_idx } });
+                try ti.addError(.{ .symbol_is_not_a_variable_but_function = .{ .declaration = token_idx, .usage = lhs_idx } });
                 return .ERROR;
             },
         }
@@ -733,7 +792,7 @@ pub const TypeInferer = struct {
                         assert(fn_template_idx != .NONE);
                         const fn_template = ti.finfo.templates.get(fn_template_idx);
                         const token_idx = ti.ast.get(fn_template.ast_idx).token_index;
-                        try ti.errors.append(ti.gpa, .{ .symbol_is_not_a_variable_but_function = .{ .declaration = token_idx, .usage = identifier_index } });
+                        try ti.addError(.{ .symbol_is_not_a_variable_but_function = .{ .declaration = token_idx, .usage = identifier_index } });
                         return .ERROR;
                     },
                 }
@@ -747,7 +806,7 @@ pub const TypeInferer = struct {
 
         // this variable apears the first time, is undeclared, and it must be reported!
         try symbol_table_stack.undeclared[symbol_table_stack.nesting_level].put(ti.gpa, varname, identifier_index);
-        try ti.errors.append(ti.gpa, .{ .undecl_var = identifier_index });
+        try ti.addError(.{ .undecl_var = identifier_index });
 
         return .ERROR;
     }
@@ -821,7 +880,7 @@ pub const TypeInferer = struct {
             const undecl = &symbol_table_stack.undeclared[symbol_table_stack.nesting_level];
             if (!undecl.contains(fname)) {
                 try undecl.put(ti.gpa, fname, node.token_index);
-                try ti.errors.append(ti.gpa, .{ .unknown_function = node_idx });
+                try ti.addError(.{ .unknown_function = node_idx });
             }
             return .ERROR;
         };
@@ -844,7 +903,7 @@ pub const TypeInferer = struct {
                 return ti.instantiateFunction(node_idx, &fn_template, arg_types);
             },
             else => {
-                try ti.errors.append(ti.gpa, .{ .symbol_is_not_a_function = .{ .declaration = symbol.declaration, .call = node.token_index } });
+                try ti.addError(.{ .symbol_is_not_a_function = .{ .declaration = symbol.declaration, .call = node.token_index } });
                 return .ERROR;
             },
         }
@@ -856,7 +915,7 @@ pub const TypeInferer = struct {
         // }
 
         // if (maybe_fhead == null) {
-        //     try ti.errors.append(ti.gpa, .{ .unknown_function = node_idx });
+        //     try ti.addError(.{ .unknown_function = node_idx });
         //     return .ERROR;
         // }
         // const fhead = maybe_fhead.?;
@@ -872,14 +931,14 @@ pub const TypeInferer = struct {
         //         if (arg_type == .ERROR) {
         //             const param_type = fhead.param_types[arg_num];
         //             if (arg_type != param_type)
-        //                 try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = arg_idx, .expected = @tagName(param_type), .actual = arg_type } });
+        //                 try ti.addError(.{ .wrong_type = .{ .ast_node = arg_idx, .expected = @tagName(param_type), .actual = arg_type } });
         //         }
         //     }
         //     arg_num += 1;
         // }
 
         // if (arg_num != fhead.param_count)
-        //     try ti.errors.append(ti.gpa, .{ .wrong_num_fun_args = .{ .ast_node = node_idx, .actual = @intCast(arg_num), .expected = fhead.param_count } });
+        //     try ti.addError(.{ .wrong_num_fun_args = .{ .ast_node = node_idx, .actual = @intCast(arg_num), .expected = fhead.param_count } });
 
         // return fhead.return_type;
     }
@@ -919,7 +978,7 @@ pub const TypeInferer = struct {
     //                     if (return_type == .VOID)
     //                         return_type = return_expr_type;
     //                     else if (return_expr_type != return_type)
-    //                         try ti.errors.append(ti.gpa, .{ .type_mismatch = .{ .ast_node = return_expr_idx, .lhs = return_type, .rhs = return_expr_type } });
+    //                         try ti.addError(.{ .type_mismatch = .{ .ast_node = return_expr_idx, .lhs = return_type, .rhs = return_expr_type } });
     //                 }
     //         }
     //         const child_type = try ti.inferType(child_idx, symbol_table_stack);
@@ -941,9 +1000,9 @@ pub const TypeInferer = struct {
             if (symbol_table_stack.tables[nl].get(varname)) |varinfo| {
                 // already declared => error
                 if (varinfo.kind == .result_variable) {
-                    try ti.errors.append(ti.gpa, .{ .redeclaration_of_result_var = identifier_index });
+                    try ti.addError(.{ .redeclaration_of_result_var = identifier_index });
                 } else {
-                    try ti.errors.append(ti.gpa, .{ .decl_shadows_outer = .{
+                    try ti.addError(.{ .decl_shadows_outer = .{
                         .outer_decl = varinfo.declaration,
                         .error_decl = identifier_index,
                     } });
@@ -958,9 +1017,9 @@ pub const TypeInferer = struct {
             if (symbol_table_stack.tables[symbol_table_stack.nesting_level].get(varname)) |varinfo| {
                 // already declared => error
                 if (varinfo.kind == .result_variable) {
-                    try ti.errors.append(ti.gpa, .{ .redeclaration_of_result_var = identifier_index });
+                    try ti.addError(.{ .redeclaration_of_result_var = identifier_index });
                 } else {
-                    try ti.errors.append(ti.gpa, .{ .multi_decl_var = .{
+                    try ti.addError(.{ .multi_decl_var = .{
                         .first_decl = varinfo.declaration,
                         .error_decl = identifier_index,
                     } });
@@ -979,7 +1038,7 @@ pub const TypeInferer = struct {
     fn instantiateFunction(ti: *TypeInferer, fn_call_node_idx: AstNodeIndex, fn_template: *const FunctionTemplate, argument_types: []DkType) !DkType { // return type of instance
         if (fn_template.param_count != argument_types.len) {
             // this should never happen if the function templates are well-formed and the type checker is correctly implemented, but we check it just to be sure.
-            try ti.errors.append(ti.gpa, .{ .wrong_num_fun_args = .{ .ast_node = fn_call_node_idx, .actual = @intCast(argument_types.len), .expected = fn_template.param_count } });
+            try ti.addError(.{ .wrong_num_fun_args = .{ .ast_node = fn_call_node_idx, .actual = @intCast(argument_types.len), .expected = fn_template.param_count } });
             return error.WrongNumberOfFunctionArguments; // TODO: if we know the return type anyway, return it and continue type checking
         }
 
@@ -990,7 +1049,7 @@ pub const TypeInferer = struct {
                 // this means that we are in a recursive call and the instance we found is the one we are currently instantiating
                 // AND the return type was not specified manually.
                 // in the future, we can try to infer the return type anyway. But for now, we just report an error.
-                try ti.errors.append(ti.gpa, .{ .return_type_missing_for_recursive_fn = fn_template.ast_idx });
+                try ti.addError(.{ .return_type_missing_for_recursive_fn = fn_template.ast_idx });
                 return .ERROR;
             } else {
                 // this means that we either have already instantiated this function with these argument types,
@@ -1002,11 +1061,15 @@ pub const TypeInferer = struct {
         }
 
         const fn_call_node = ti.ast.get(fn_call_node_idx);
-        const fn_arguments_node = ti.ast.get(fn_call_node.first_child);
+        // const fn_arguments_node = ti.ast.get(fn_call_node.first_child);
 
-        var argument_node_iterator = fn_arguments_node.children(ti.ast);
+        var argument_node_iterator = fn_call_node.children(ti.ast);
         for (fn_template.params(&ti.finfo.params), argument_types) |param, arg_type| {
-            const fn_argument_node_idx = argument_node_iterator.nextIdx() orelse unreachable; // for error reporting
+            const fn_argument_node_idx = argument_node_iterator.nextIdx() orelse {
+                std.debug.print("#### INTERNAL ERROR: argument node index out of bounds when instantiating function {s} param: {s} ##########\n\n", .{ fn_name, ti.ts.sourceStr(param.name_token_idx) });
+                par.debugPrintAstBranch(fn_call_node_idx, ti.ast, ti.tokens, ti.source);
+                unreachable;
+            }; // for error reporting
 
             switch (param.type_) {
                 .TYPEVAR => |typevar_id| {
@@ -1015,7 +1078,7 @@ pub const TypeInferer = struct {
                 },
                 .CONCRETE => |param_type| {
                     if (param_type != arg_type) {
-                        try ti.errors.append(ti.gpa, .{ .wrong_type = .{ .ast_node = fn_argument_node_idx, .expected = @tagName(param_type), .actual = arg_type } });
+                        try ti.addError(.{ .wrong_type = .{ .ast_node = fn_argument_node_idx, .expected = @tagName(param_type), .actual = arg_type } });
                         return .ERROR; // TODO: if we know the return type anyway, return it and continue type checking
                     }
                 },
@@ -1027,6 +1090,9 @@ pub const TypeInferer = struct {
         //     const param_name = param_token.str(ti.source);
         //     try symbol_table_stack[0].put(ti.gpa, param_name, .{ .declaration = param.name_token_idx, .kind = .variable(param_type) });
         // }
+
+        try ti.fn_instantiation_ast_idx_stack.append(ti.gpa, fn_call_node_idx);
+        defer { _ = ti.fn_instantiation_ast_idx_stack.pop(); }
 
         return ti.actuallyInstantiateFunction(fn_template, argument_types, fn_template.return_type);
 
@@ -1076,7 +1142,7 @@ pub const TypeInferer = struct {
         // add a variable for the result type:
         try symbol_table_stack.tables[0].put(ti.gpa, "result", .{ .declaration = fn_template.ast_idx, .kind = .{ .result_variable = return_type } }); // FIXME: use the index of the return type decl here. Instead of the one of the function decl
 
-        const instance_param_types = &ti.finfo.instance_param_types;
+        const instance_param_types = &ti.finfo.instances.param_types;
 
         // try instance_param_types.ensureCapacity(instance_param_types.items.len + fn_template.param_count);
         const first_param_type_idx = instance_param_types.items.len;
@@ -1093,12 +1159,16 @@ pub const TypeInferer = struct {
 
         // add a an incomplete entry so we know, that this function is already in process of being instantiated.
         // This is used to detect recursion.
-        const inst = try ti.finfo.instances.put(.{ .name = fn_name, .param_types = stored_param_types }, FunctionInstance{
+        const res = try ti.finfo.instances.put(.{ .name = fn_name, .param_types = stored_param_types }, FunctionInstance{
             .name_ = .{ .user_defined = fn_template.ast_idx },
             .param_count = fn_template.param_count,
             .first_param_type_idx = @enumFromInt(first_param_type_idx),
             .return_type = return_type, // may be .UNKNOWN, will be updated later in this case
         });
+        const inst = res.value_ptr;
+        try ti.fn_instantiation_stack.append(ti.gpa, res.index);
+        defer { _ = ti.fn_instantiation_stack.pop(); }
+
 
         _ = try ti.inferType(fn_template.body_ast_idx, &symbol_table_stack);
 
@@ -1137,7 +1207,7 @@ pub const TypeInferer = struct {
             // TODO: differentiate btw a duplicate function and a variable/constant with the same name
 
             // report duplicate function:
-            try ti.errors.append(ti.gpa, .{ .multi_decl_fn = .{
+            try ti.addError(.{ .multi_decl_fn = .{
                 .first_decl = existing_fn_info.declaration,
                 .error_decl = ft_node.token_index,
             } });
@@ -1156,7 +1226,7 @@ pub const TypeInferer = struct {
             // check is param shadows a global symbol:
             const param_name = ti.tokens[param_node.token_index].str(ti.source);
             if (symbol_table.get(param_name)) |existing_param| {
-                try ti.errors.append(ti.gpa, .{ .param_shadows_global = .{
+                try ti.addError(.{ .param_shadows_global = .{
                     .global_decl = existing_param.declaration,
                     .param_decl = param_node.token_index,
                 } });
@@ -1178,7 +1248,7 @@ pub const TypeInferer = struct {
                 const param_i_name = ti.tokens[param_i_token_idx].str(ti.source);
                 const param_j_name = ti.tokens[param_j_token_idx].str(ti.source);
                 if (std.mem.eql(u8, param_i_name, param_j_name)) {
-                    try ti.errors.append(ti.gpa, .{ .function_parameters_have_same_name = .{
+                    try ti.addError(.{ .function_parameters_have_same_name = .{
                         .first_param = param_i_token_idx,
                         .second_param = param_j_token_idx,
                     } });
@@ -1231,20 +1301,93 @@ pub const TypeInferer = struct {
         writer: *std.Io.Writer,
         ts: TokenStream,
         node_idx: AstNodeIndex,
+        enforce_indent : ?usize,
     ) !SourceLoc {
         const node = ti.ast.get(node_idx);
+        const main_token = ts.tokens[node.token_index];
+        const token_line = ts.token_lines[node.token_index];
+        const line_info = ts.line_infos[token_line];
 
-        // FIXME!!!
-        return ts.printLineAndMarkToken(writer, node.token_index);
+        const line = ts.source[line_info.start..line_info.end];
+        var num_whitespace : usize = 0;
+        var additional_indent : usize = 0;
+        if (enforce_indent) |indent| {
+            additional_indent = indent;
+            for (line) |c| {
+                if (c == ' ') {
+                    num_whitespace += 1;
+                    
+                } else {
+                    break;
+                }
+            }   
+        }
+
+        // Print the source line.
+        try writer.splatByteAll(' ', additional_indent);
+        try writer.print("{s}\n", .{line[num_whitespace..]});
+
+        const border_tokens = par.getFirstAndLastTokenOfAstBranch(node_idx, ti.ast);
+        var start_char = ti.tokens[border_tokens.first].start;
+        var end_char = ti.tokens[border_tokens.last].end();
+        if( start_char < line_info.start ) {
+            start_char = line_info.start;
+            while(start_char < line_info.end and ti.source[start_char] == ' ')
+                start_char += 1;
+        }
+        if( end_char > line_info.end ) {
+            end_char = line_info.end;
+            while(end_char > line_info.start and ti.source[end_char - 1] == ' ')
+                end_char -= 1;
+        }
+
+        // Build underline buffer: space = no mark, '^' = main token, '~' = other tokens in branch.
+        var underline: [256]u8 = .{' '} ** 256;
+        var underline_len: usize = 0;
+
+        {   
+            const start_col = start_char-line_info.start;
+            const end_col = @min(end_char-line_info.start, underline.len);
+            @memset(underline[start_col..end_col], '"');
+            underline_len = end_col;
+        }
+        // Main token overwrites with '^'.
+        {   
+            const start_col = main_token.start-line_info.start;
+            const end_col = @min(main_token.end() - line_info.start, underline.len);
+            @memset(underline[start_col..end_col], '^');
+        }
+
+        try writer.splatByteAll(' ', additional_indent);
+        try writer.print("{s}\n", .{underline[num_whitespace..underline_len]});
+
+        return .{ .line = token_line, .column = main_token.start - line_info.start };
     }
 
+
     pub fn printErrors(ti: *const TypeInferer, writer: *std.Io.Writer, ts: TokenStream) !void {
-        for (ti.errors.items) |err| {
+        const code_indent = 4;
+
+        try writer.writeByte('\n');
+        for (ti.errors.items) |error_info| {
+            const inst_info = error_info.fn_instantiation_stack_top[0];
+            const inst = ti.finfo.instances.getByIndex(inst_info.function);
+            
+            // try writer.splatByteAll(' ', indentation);
+            try writer.print("in\nfn {s}(", .{inst.name(ti)});
+            for(ti.finfo.paramTypesOfInstance(inst)) |param_type| {
+                try writer.print("{s},", .{@tagName(param_type)});
+            }
+            try writer.writeAll("):\n");  
+
+
+            const err = error_info.error_;
+            // try writer.writeByte('\n');
             switch (err) {
                 .undecl_var => |token_index| {
                     const pos = try ts.printLineAndMarkToken(writer, token_index);
                     try writer.print(
-                        "line {}: Error: undeclared variable \"{s}\" (declare using the := operator).\n\n",
+                        "line {}: Error: undeclared variable \"{s}\" (declare using the := operator).\n",
                         .{ pos.line, ts.sourceStr(token_index) },
                     );
                 },
@@ -1255,7 +1398,6 @@ pub const TypeInferer = struct {
                         .{ pos.line, ts.sourceStr(e.error_decl), ts.token_lines[e.first_decl] },
                     );
                     _ = try ts.printLineAndMarkToken(writer, e.first_decl);
-                    try writer.writeByte('\n');
                 },
                 .multi_decl_fn => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
@@ -1264,7 +1406,6 @@ pub const TypeInferer = struct {
                         .{ pos.line, ts.sourceStr(e.error_decl), ts.token_lines[e.first_decl] },
                     );
                     _ = try ts.printLineAndMarkToken(writer, e.first_decl);
-                    try writer.writeByte('\n');
                 },
                 .decl_shadows_outer => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
@@ -1273,32 +1414,28 @@ pub const TypeInferer = struct {
                         .{ pos.line, ts.sourceStr(e.error_decl), ts.token_lines[e.outer_decl] },
                     );
                     _ = try ts.printLineAndMarkToken(writer, e.outer_decl);
-                    try writer.writeByte('\n');
                 },
                 .unknown_function => |node_idx| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, node_idx);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, node_idx, code_indent);
                     const node = ti.ast.get(node_idx);
                     try writer.print(
                         "line {}: Error: unknown function \"{s}\".\n",
                         .{ pos.line, ts.sourceStr(node.token_index) },
                     );
-                    try writer.writeByte('\n');
                 },
                 .wrong_type => |e| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node, code_indent);
                     try writer.print(
                         "line {}: Error: wrong type: {s}. Expected: {s}.\n",
                         .{ pos.line, @tagName(e.actual), e.expected },
                     );
-                    try writer.writeByte('\n');
                 },
                 .type_mismatch => |e| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node, code_indent);
                     try writer.print(
                         "line {}: Error: type mismatch: LHS: {s}. RHS: {s}.\n",
                         .{ pos.line, @tagName(e.lhs), @tagName(e.rhs) },
                     );
-                    try writer.writeByte('\n');
                 },
                 .fn_params_are_immutable => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.usage);
@@ -1306,15 +1443,13 @@ pub const TypeInferer = struct {
                         "line {}: Error: function parameters are immutable, but parameter \"{s}\" is assigned a value.\n",
                         .{ pos.line, ts.sourceStr(e.declaration) },
                     );
-                    try writer.writeByte('\n');
                 },
                 .wrong_num_fun_args => |e| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node, code_indent);
                     try writer.print(
                         "line {}: Error: wrong number of function arguments: {}. Expected: {}.\n",
                         .{ pos.line, e.actual, e.expected },
                     );
-                    try writer.writeByte('\n');
                 },
                 .symbol_is_not_a_function => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.call);
@@ -1322,7 +1457,6 @@ pub const TypeInferer = struct {
                         "line {}: Error: symbol \"{s}\" is not a function (declared on line {}).\n",
                         .{ pos.line, ts.sourceStr(e.call), ts.token_lines[e.declaration] },
                     );
-                    try writer.writeByte('\n');
                 },
                 .symbol_is_not_a_variable_but_function => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.usage);
@@ -1330,7 +1464,6 @@ pub const TypeInferer = struct {
                         "line {}: Error: symbol \"{s}\" is not a variable but a function (declared on line {}).\n",
                         .{ pos.line, ts.sourceStr(e.usage), ts.token_lines[e.declaration] },
                     );
-                    try writer.writeByte('\n');
                 },
                 .redeclaration_of_result_var => |token_index| {
                     const pos = try ts.printLineAndMarkToken(writer, token_index);
@@ -1338,7 +1471,6 @@ pub const TypeInferer = struct {
                         "line {}: Error: redeclaration of reserved result variable \"result\".\n",
                         .{pos.line},
                     );
-                    try writer.writeByte('\n');
                 },
                 .param_shadows_global => |e| {
                     const pos = try ts.printLineAndMarkToken(writer, e.param_decl);
@@ -1346,8 +1478,6 @@ pub const TypeInferer = struct {
                         "line {}: Error: parameter \"{s}\" shadows global variable declared on line {}:\n",
                         .{ pos.line, ts.sourceStr(e.param_decl), ts.token_lines[e.global_decl] },
                     );
-                    _ = try ts.printLineAndMarkToken(writer, e.global_decl);
-                    try writer.writeByte('\n');
                 },
                 .function_parameters_have_same_name => |e| {
                     // TODO: mark both tokens instead of only the second one
@@ -1356,30 +1486,59 @@ pub const TypeInferer = struct {
                         "line {}: Error: parameter \"{s}\" has same name as previous parameter on line {}:\n",
                         .{ pos.line, ts.sourceStr(e.second_param), ts.token_lines[e.first_param] },
                     );
-                    _ = try ts.printLineAndMarkToken(writer, e.first_param);
-                    try writer.writeByte('\n');
                 },
                 .return_type_missing_for_recursive_fn => |node_idx| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, node_idx);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, node_idx, code_indent);
                     const node = ti.ast.get(node_idx);
                     try writer.print(
                         "line {}: Error: cannot infer return type for recursive function \"{s}\". Return type must be explicitly declared.\n",
                         .{ pos.line, ts.sourceStr(node.token_index) },
                     );
-                    try writer.writeByte('\n');
                 },
                 .result_type_mismatch => |e| {
-                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node);
+                    const pos = try ti.printLineAndMarkAstNode(writer, ts, e.ast_node, code_indent);
                     try writer.print(
                         "line {}: Error: result type mismatch: Result type should be: {s}. But result is assigned {s}.\n",
                         .{ pos.line, @tagName(e.lhs), @tagName(e.rhs) },
                     );
-                    try writer.writeByte('\n');
+                    
                 },
             }
+            try ti.printInstantiationSack(writer, error_info, 4, 1);
+            try writer.writeByte('\n');
         }
+        
         try writer.flush();
     }
+
+    fn printInstantiationSack(ti : *const TypeInferer, writer: *std.Io.Writer, error_info : ErrorInfo, indentation: usize, first_entry_to_print:usize) !void {
+        try writer.writeByte('\n');
+        try writer.splatByteAll(' ', indentation);
+        try writer.writeAll("function instantiation stack:\n\n");
+        for (error_info.fn_instantiation_stack_top[first_entry_to_print..error_info.fn_instantiation_stack_len]) |inst_info| {
+            const inst = ti.finfo.instances.getByIndex(inst_info.function);
+            
+            try writer.splatByteAll(' ', indentation);
+            try writer.print("fn {s}(", .{inst.name(ti)});
+            for(ti.finfo.paramTypesOfInstance(inst)) |param_type| {
+                try writer.print("{s},", .{@tagName(param_type)});
+            }
+
+            try writer.writeAll(")\n");            
+            
+            if(inst_info.fn_call_ast_idx != 0) {
+                const line_num = ti.ts.token_lines[ti.ast.get(inst_info.fn_call_ast_idx).token_index];
+                try writer.splatByteAll(' ', indentation);
+                try writer.print("    line {}:\n", .{line_num});
+                const pos = try ti.printLineAndMarkAstNode(writer, ti.ts, inst_info.fn_call_ast_idx, indentation+4);
+                _ = pos;
+            }
+            else {
+                try writer.writeByte('\n');
+            }
+        }
+    }
+
 };
 
 // pub fn printAstBranchWithTypes(p: *const Parser, writer: *std.Io.Writer, node_types: []DkType, ast_index: AstNodeIndex, indentation: usize) !void {
@@ -1422,13 +1581,20 @@ test "TypeInferer" {
     // ;
 
     const source =
+        \\fn do_zins(prev_val, zins)
+        \\    result = prev_val * zins
+        \\
+        \\fn zinseszins(initial, zins, jahre)
+        \\      result = initial
+        \\      jahr := 0
+        \\      while jahr < jahre
+        \\         result = do_zins(result, zins)
+        \\         jahr += 1
+        \\
         \\fn main()
         \\    jahr := 0
-        \\    zins := 1.02
-        \\    result = 1.0
-        \\    while jahr < 10
-        \\         result *= zins
-        \\         jahr += 1
+        \\    zins := 1 # 1.02
+        \\    result = zinseszins(1000.0, zins, 10)
         \\    
     ;
 
@@ -1465,12 +1631,12 @@ test "TypeInferer" {
     // try stdout.flush();
 
     // validate shit:
-    var ti = try TypeInferer.init(gpa, &parser);
+    var ti = try TypeInferer.init(gpa, ts, &parser);
     defer ti.deinit();
 
     try std.testing.expect(parser.ast.equals(snapshot));
     ti.checkAndReconstructTypes(parser.root_node) catch |err| {
-        try stdout.print("Error at type inference stage: {}\n", .{err});
+        try stdout.print("\nError at type inference stage: {}\n", .{err});
         
     };
     try ti.printErrors(stdout, ts);

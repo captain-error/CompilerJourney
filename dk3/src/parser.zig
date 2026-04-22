@@ -3,6 +3,8 @@ const tok = @import("tokenizer.zig");
 const treemod = @import("tree.zig");
 // const exdat = @import("extra_data.zig");
 
+const par = @This();
+
 const assert = std.debug.assert;
 
 const Token = tok.Token;
@@ -692,44 +694,7 @@ pub const Parser = struct {
     }
 
     pub fn printAstBranch(p: *const Parser, writer: *std.Io.Writer, ast_index: AstNodeIndex, indentation: usize) !void {
-        try writer.splatByteAll(' ', 4 * indentation);
-
-        if (ast_index == 0) {
-            try writer.writeAll("INVALID\n");
-            return;
-        }
-
-        const node = p.ast.get(ast_index).*;
-        const token = p.tokens[node.token_index];
-
-        try writer.print("{s} ({s}[{s}]) #{} (next_sibling={})\n", .{
-            @tagName(node.tag),
-            @tagName(token.tag),
-            if (token.tag == .EOL) "" else token.str(p.source),
-            ast_index,
-            p.ast.get(ast_index).next_sibling,
-        });
-
-        if (node.hasChild()) {
-            var child_list = node.children(&p.ast);
-            while (child_list.nextIdx()) |child_idx|
-                try p.printAstBranch(writer, child_idx, indentation + 1);
-        }
-        // if (node.tag == .BLOCK or node.tag == .FNCALL) {
-        //     try writer.print(" #children= {}\n", .{node.childCount()});
-        //     var child_list = p.extra.getList(AstNodeIndex, node.rhs);
-        //     while (child_list.next()) |i|
-        //         try p.printAstBranch(writer, i, indentation + 1);
-
-        //     return;
-        // }
-        // try writer.writeByte('\n');
-
-        // if (node.tag == .ATOM) return;
-        // try p.printAstBranch(writer, node.lhs, indentation + 1);
-
-        // if (node.tag == .UNARY_OP) return;
-        // try p.printAstBranch(writer, node.rhs, indentation + 1);
+        try par.printAstBranch(writer, ast_index, &p.ast, p.tokens, p.source, indentation);
     }
 
     pub fn printAllNodesFlat(p: *const Parser, writer: *std.Io.Writer) !void {
@@ -745,3 +710,61 @@ pub const Parser = struct {
         try writer.writeByte('\n');
     }
 };
+
+pub fn getFirstAndLastTokenOfAstBranch(ast_index: AstNodeIndex, ast : *const AST) struct{first:TokenIndex, last:TokenIndex} {
+    assert(ast_index != 0);
+
+    const node = ast.get(ast_index);
+    var first_token_idx = node.token_index;
+    var last_token_idx = node.token_index;
+
+    if (node.hasChild()) {
+        var child_list = node.children(ast);
+        while (child_list.nextIdx()) |child_idx| {
+            const child_res = getFirstAndLastTokenOfAstBranch(child_idx, ast);
+            assert(child_res.first != 0);
+            assert(child_res.last != 0);
+            assert(child_res.first <= child_res.last);
+
+            first_token_idx = @min(first_token_idx, child_res.first);
+            last_token_idx  = @max(last_token_idx, child_res.last);
+        }
+    }
+
+    return .{ .first = first_token_idx, .last = last_token_idx };
+}
+
+pub fn printAstBranch(writer: *std.Io.Writer, ast_index: AstNodeIndex, ast : *const AST, tokens : []const Token, source : []const u8, indentation: usize) !void {
+    try writer.splatByteAll(' ', 4 * indentation);
+
+    if (ast_index == 0) {
+        try writer.writeAll("INVALID\n");
+        return;
+    }
+
+    const node = ast.get(ast_index).*;
+    const token = tokens[node.token_index];
+
+    try writer.print("{s} ({s}[{s}]) #{} (next_sibling={})\n", .{
+        @tagName(node.tag),
+        @tagName(token.tag),
+        if (token.tag == .EOL) "" else token.str(source),
+        ast_index,
+        ast.get(ast_index).next_sibling,
+    });
+
+    if (node.hasChild()) {
+        var child_list = node.children(ast);
+        while (child_list.nextIdx()) |child_idx|
+            try printAstBranch(writer, child_idx, ast, tokens, source, indentation + 1);
+    }
+}
+
+
+pub fn debugPrintAstBranch(ast_index: AstNodeIndex, ast : *const AST, tokens : []const Token, source : []const u8) void {
+    var buffer: [64]u8 = undefined;
+    const bw = std.debug.lockStderrWriter(&buffer);
+    defer std.debug.unlockStderrWriter();
+
+    printAstBranch(bw, ast_index, ast, tokens, source, 0) catch {};
+}
