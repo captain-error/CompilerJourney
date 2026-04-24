@@ -2,6 +2,8 @@ const std = @import("std");
 const tok = @import("tokenizer.zig");
 const par = @import("parser.zig");
 const util = @import("util.zig");
+const ft_ast = @import("ft_ast.zig");
+
 
 const assert = std.debug.assert;
 
@@ -15,247 +17,9 @@ const AstNode = par.AstNode;
 const Parser = par.Parser;
 const AstNodeIndex = par.AstNodeIndex;
 
+const FtAst = ft_ast.FtAst;
+
 const MAX_NUM_FUNCTION_PARAMS = 32;
-
-const FunctionTemplate = struct {
-    ast_idx: AstNodeIndex,
-    body_ast_idx: AstNodeIndex,
-    first_param_idx: FunctionParams.Index = .NONE,
-    param_count: u8 = 0,
-    typevar_count: u8 = 0,
-    return_type: DkType = .UNKNOWN,
-
-    pub fn name(self: *const FunctionTemplate, ti: *const TypeInferer) []const u8 {
-        assert(self.ast_idx != 0);
-        const ast_node = ti.ast.get(self.ast_idx);
-        switch(ast_node.tag) {
-            .FNDECL => {},
-            else => {
-                std.debug.print("INTERNAL COMPILER ERROR: function template: AST node is not a FNDECL: {any}\n", .{ ast_node });
-                unreachable;
-            },
-        }
-        const name_token = ti.tokens[ast_node.token_index];
-        switch(name_token.tag) {
-            .IDENTIFIER => return name_token.str(ti.source),
-            else => {
-                std.debug.print("INTERNAL COMPILER ERROR: function template name token is not an identifier. token: {any} \"{s}\"\n", .{ name_token, name_token.str(ti.source) });
-                unreachable;
-            },
-        }
-        
-    }
-
-    pub fn params(self: *const FunctionTemplate, params_array: *const FunctionParams) []const FunctionParam {
-        return params_array.slice(self.first_param_idx, self.param_count);
-    }
-
-    pub const null_element = FunctionTemplate{
-        .ast_idx = 0,
-        .body_ast_idx = 0,
-        .first_param_idx = .NONE,
-        .param_count = 0,
-        .typevar_count = 0,
-        .return_type = .UNKNOWN,
-    };
-};
-
-const TypeVarId = u8; // FIXME
-
-const FunctionParam = struct {
-    name_token_idx: TokenIndex = 0,
-    type_: union(enum) {
-        CONCRETE: DkType,
-        TYPEVAR: TypeVarId,
-    } = .{ .CONCRETE = .UNKNOWN },
-};
-
-const FunctionTemplates = util.ArrayList(FunctionTemplate);
-const FunctionParams = util.ArrayList(FunctionParam);
-const Types = util.ArrayList(DkType);
-
-const FunctionInstance = struct {
-    name_: union(enum) {
-        builtin: []const u8,
-        user_defined: AstNodeIndex, // index of function head in ast
-    },
-    return_type: DkType = .UNKNOWN,
-    param_count: u8 = 0,
-    first_param_type_idx: Types.Index = .NONE, // index to type of first param. the next param types are at subsequent indices. (i.e. param_types + 1, param_types + 2, etc.)
-    // body_type_offset: u32 = 0, // given the AST-branch for this function, the index of the type for each AST node can be found by indexOf(node) + body_type_offset.
-
-    pub fn name(self: *const FunctionInstance, ti: *const TypeInferer) []const u8 {
-        switch (self.name_) {
-            .builtin => return self.name_.builtin,
-            .user_defined => {
-                const ast_node = ti.ast.get(self.name_.user_defined);
-                const name_token = ti.tokens[ast_node.token_index];
-                assert(name_token.tag == .IDENTIFIER);
-                return name_token.str(ti.source);
-            },
-        }
-    }
-};
-
-const FunctionInstanceKey = struct {
-    name: []const u8,
-    param_types: Types.IndexRange, // types of parameters. the length of this array is equal to the param_count field of FunctionInstance
-};
-const FunctionInstancePseudoKey = struct {
-    name: []const u8,
-    param_types: []DkType,
-};
-
-const FunctionInstanceHashContext = struct {
-    types: *Types, // needed to resolve the type enums in the keys to actual types for hashing and equality checks
-
-    fn combineHash(h: u64, t: DkType) u64 {
-        return h ^ (@as(u64, @intFromEnum(t)) +% 0x9e3779b9 +% (h << 6) +% (h >> 2)); // from boost's hash_combine function
-    }
-
-    fn hashFunctionInstanceKey(ctx: FunctionInstanceHashContext, key: FunctionInstanceKey) u64 {
-        var h = std.hash_map.hashString(key.name);
-        var it = key.param_types.iterator();
-        while (it.next()) |i| {
-            const t = ctx.types.get(i);
-            h = combineHash(h, t);
-        }
-
-        return h;
-    }
-
-    fn hashFunctionInstancePseudoKey(ctx: FunctionInstanceHashContext, key: FunctionInstancePseudoKey) u64 {
-        _ = ctx;
-        var h = std.hash_map.hashString(key.name);
-        for (key.param_types) |t| {
-            h = combineHash(h, t);
-        }
-
-        return h;
-    }
-
-    pub fn hash(ctx: FunctionInstanceHashContext, key: anytype) u32 {
-        return @intCast(0xffffffff & switch (@TypeOf(key)) {
-            FunctionInstanceKey => ctx.hashFunctionInstanceKey(key),
-            FunctionInstancePseudoKey => ctx.hashFunctionInstancePseudoKey(key),
-            else => unreachable,
-        });
-    }
-
-    pub fn eql(ctx: FunctionInstanceHashContext, a: anytype, b: FunctionInstanceKey, index : usize) bool {
-        _ = index;
-        switch (@TypeOf(a)) {
-            FunctionInstanceKey => return ctx.eqlKey(a, b),
-            FunctionInstancePseudoKey => return ctx.eqlPseudoKey(a, b),
-            else => unreachable,
-        }
-    }
-
-    fn eqlPseudoKey(ctx: FunctionInstanceHashContext, a: FunctionInstancePseudoKey, b: FunctionInstanceKey) bool {
-        if (a.param_types.len != b.param_types.len())
-            return false;
-
-        if (!std.mem.eql(u8, a.name, b.name))
-            return false;
-
-        for (a.param_types, ctx.types.sliceFromRange(b.param_types)) |a_type, b_type| {
-            if (b_type != a_type)
-                return false;
-        }
-
-        return true;
-    }
-
-    fn eqlKey(ctx: FunctionInstanceHashContext, a: FunctionInstanceKey, b: FunctionInstanceKey) bool {
-        if (a.param_types.len() != b.param_types.len())
-            return false;
-
-        if (!std.mem.eql(u8, a.name, b.name))
-            return false;
-
-        for (ctx.types.sliceFromRange(a.param_types), ctx.types.sliceFromRange(b.param_types)) |a_type, b_type| {
-            if (b_type != a_type)
-                return false;
-        }
-
-        return true;
-    }
-};
-
-const FunctionInstances = struct {
-    // hash_map: std.hash_map.HashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext, 75),
-    hash_map: HashMap,
-    gpa: std.mem.Allocator,
-    param_types: Types,
-
-    const HashMap = std.ArrayHashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext,true);
-    const Index = usize;
-
-    const CTX = FunctionInstanceHashContext;
-
-    pub fn init( gpa: std.mem.Allocator) !FunctionInstances {
-        return FunctionInstances{
-            .hash_map = .empty,
-            .gpa = gpa,
-            .param_types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
-        };
-    }
-
-    pub fn deinit(self: *FunctionInstances) void {
-        self.hash_map.deinit(self.gpa);
-        self.param_types.deinit();
-    }
-
-    pub fn getPtr(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?*const FunctionInstance {
-        return self.hash_map.getPtrAdapted(key, CTX{.types=&self.param_types});
-    }
-
-    pub fn get(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?FunctionInstance {
-        return self.hash_map.getAdapted(key, CTX{.types=&self.param_types});
-    }
-
-    pub fn getByIndex(self: *const FunctionInstances, index: Index) FunctionInstance {
-        return self.hash_map.entries.get(index).value;
-    }
-
-    pub fn contains(self: *FunctionInstances, key: FunctionInstancePseudoKey) bool {
-        return self.hash_map.containsAdapted(key, CTX{.types=&self.param_types});
-    }
-
-    pub fn put(self: *FunctionInstances, key: FunctionInstanceKey, value: FunctionInstance) !HashMap.GetOrPutResult {
-        const res = try self.hash_map.getOrPutContextAdapted(self.gpa, key, CTX{.types=&self.param_types}, CTX{.types=&self.param_types});
-        assert(!res.found_existing);
-        res.value_ptr.* = value;
-        return res;
-    }
-};
-const FunctionInstanceIndex = FunctionInstances.Index;
-
-const FunctionInfos = struct {
-    templates: FunctionTemplates,
-    params: FunctionParams,
-    instances: FunctionInstances,
-    // instance_param_types: Types,
-
-    pub fn init(gpa: std.mem.Allocator) !FunctionInfos {
-        return FunctionInfos{
-            .templates = try .initWithNullElement(gpa, 32, FunctionTemplate.null_element),
-            .params = try .init(gpa, 128),
-            .instances = try .init(gpa),
-        };
-    }
-
-    pub fn deinit(self: *FunctionInfos) void {
-        self.templates.deinit();
-        self.params.deinit();
-        self.instances.deinit();
-    }
-
-    pub fn paramTypesOfInstance(self: *const FunctionInfos, instance: FunctionInstance) []const DkType {
-        assert(instance.first_param_type_idx != .NONE);
-        return self.instances.param_types.slice(instance.first_param_type_idx, instance.param_count);
-    }
-};
 
 const builtin_functions = [_]FunctionInstance{
     .{ .name = .builtin("print"), .return_type = .VOID, .param_count = 1, .first_param_type_idx = .NONE }, // FIXME: set propper type for param
@@ -389,6 +153,7 @@ pub const TypeInferer = struct {
     ts : TokenStream,
     ast: *const AST,
     // node_types: []DkType, // types for each node in the ast
+    name_resolution: []TokenIndex, // indexed by AstNodeIndex. 0 = not annotated. Maps identifier usages to their declaration token index.
     root_index: AstNodeIndex,
     gpa: std.mem.Allocator,
 
@@ -505,12 +270,15 @@ pub const TypeInferer = struct {
         ts : TokenStream,
         parser: *const Parser,
     ) !TypeInferer {
+        const name_resolution = try gpa.alloc(TokenIndex, parser.ast.nodeCount());
+        @memset(name_resolution, 0);
+
         var ti = TypeInferer{
             .source = parser.source,
             .tokens = parser.tokens,
             .ast = &parser.ast,
             .ts = ts,
-            // .node_types = try gpa.alloc(DkType, parser.ast.nodeCount()),
+            .name_resolution = name_resolution,
             .root_index = parser.root_node,
             .gpa = gpa,
             .finfo = undefined,
@@ -532,6 +300,7 @@ pub const TypeInferer = struct {
         ti.symbol_table_pool.deinit();
         ti.fn_instantiation_stack.deinit(ti.gpa);
         ti.fn_instantiation_ast_idx_stack.deinit(ti.gpa);
+        ti.gpa.free(ti.name_resolution);
     }
 
     pub fn hasErrors(ti: *const TypeInferer) bool {
@@ -744,6 +513,7 @@ pub const TypeInferer = struct {
                 return rhs_type;
             },
             .result_variable => |result_type| {
+                ti.name_resolution[lhs_idx] = symbol.declaration;
                 const rhs_type = try ti.inferType(rhs_idx, symbol_table_stack);
                 if (result_type == .UNKNOWN) {
                     // this is the first assignment to the result variable, so we can set its type now:
@@ -773,13 +543,13 @@ pub const TypeInferer = struct {
             .TRUE, .FALSE => .BOOL,
             .INT_LIT      => .INT,
             .FLOAT_LIT    => .FLOAT,
-            .IDENTIFIER   => ti.getTypeOfVariable(node.token_index, symbol_table_stack),
+            .IDENTIFIER   => ti.getTypeOfVariable(node_idx, node.token_index, symbol_table_stack),
             // zig fmt: on
             else => unreachable,
         };
     }
 
-    fn getTypeOfVariable(ti: *TypeInferer, identifier_index: TokenIndex, symbol_table_stack: *SymbolTableStack) !DkType {
+    fn getTypeOfVariable(ti: *TypeInferer, node_idx: AstNodeIndex, identifier_index: TokenIndex, symbol_table_stack: *SymbolTableStack) !DkType {
         const token = ti.tokens[identifier_index];
         std.debug.assert(token.tag == .IDENTIFIER);
         const varname = token.str(ti.source);
@@ -787,7 +557,10 @@ pub const TypeInferer = struct {
         for (0..symbol_table_stack.nesting_level + 1) |nl| {
             if (symbol_table_stack.tables[nl].get(varname)) |var_info| {
                 switch(var_info.kind) {
-                    .variable, .fn_param, .result_variable => |t| return t,
+                    .variable, .fn_param, .result_variable => |t| {
+                        ti.name_resolution[node_idx] = var_info.declaration;
+                        return t;
+                    },
                     .function => |fn_template_idx| {
                         assert(fn_template_idx != .NONE);
                         const fn_template = ti.finfo.templates.get(fn_template_idx);
@@ -1541,6 +1314,252 @@ pub const TypeInferer = struct {
 
 };
 
+// -----------------------------------------------------------------------
+
+
+const FunctionTemplate = struct {
+    ast_idx: AstNodeIndex,
+    body_ast_idx: AstNodeIndex,
+    first_param_idx: FunctionParams.Index = .NONE,
+    param_count: u8 = 0,
+    typevar_count: u8 = 0,
+    return_type: DkType = .UNKNOWN,
+
+    pub fn name(self: *const FunctionTemplate, ti: *const TypeInferer) []const u8 {
+        assert(self.ast_idx != 0);
+        const ast_node = ti.ast.get(self.ast_idx);
+        switch(ast_node.tag) {
+            .FNDECL => {},
+            else => {
+                std.debug.print("INTERNAL COMPILER ERROR: function template: AST node is not a FNDECL: {any}\n", .{ ast_node });
+                unreachable;
+            },
+        }
+        const name_token = ti.tokens[ast_node.token_index];
+        switch(name_token.tag) {
+            .IDENTIFIER => return name_token.str(ti.source),
+            else => {
+                std.debug.print("INTERNAL COMPILER ERROR: function template name token is not an identifier. token: {any} \"{s}\"\n", .{ name_token, name_token.str(ti.source) });
+                unreachable;
+            },
+        }
+        
+    }
+
+    pub fn params(self: *const FunctionTemplate, params_array: *const FunctionParams) []const FunctionParam {
+        return params_array.slice(self.first_param_idx, self.param_count);
+    }
+
+    pub const null_element = FunctionTemplate{
+        .ast_idx = 0,
+        .body_ast_idx = 0,
+        .first_param_idx = .NONE,
+        .param_count = 0,
+        .typevar_count = 0,
+        .return_type = .UNKNOWN,
+    };
+};
+
+const TypeVarId = u8; // FIXME
+
+const FunctionParam = struct {
+    name_token_idx: TokenIndex = 0,
+    type_: union(enum) {
+        CONCRETE: DkType,
+        TYPEVAR: TypeVarId,
+    } = .{ .CONCRETE = .UNKNOWN },
+};
+
+const FunctionTemplates = util.ArrayList(FunctionTemplate);
+const FunctionParams = util.ArrayList(FunctionParam);
+const Types = util.ArrayList(DkType);
+
+const FunctionInstance = struct {
+    name_: union(enum) {
+        builtin: []const u8,
+        user_defined: AstNodeIndex, // index of function head in ast
+    },
+    return_type: DkType = .UNKNOWN,
+    param_count: u8 = 0,
+    first_param_type_idx: Types.Index = .NONE, // index to type of first param. the next param types are at subsequent indices. (i.e. param_types + 1, param_types + 2, etc.)
+    // body_type_offset: u32 = 0, // given the AST-branch for this function, the index of the type for each AST node can be found by indexOf(node) + body_type_offset.
+
+    pub fn name(self: *const FunctionInstance, ti: *const TypeInferer) []const u8 {
+        switch (self.name_) {
+            .builtin => return self.name_.builtin,
+            .user_defined => {
+                const ast_node = ti.ast.get(self.name_.user_defined);
+                const name_token = ti.tokens[ast_node.token_index];
+                assert(name_token.tag == .IDENTIFIER);
+                return name_token.str(ti.source);
+            },
+        }
+    }
+};
+
+const FunctionInstanceKey = struct {
+    name: []const u8,
+    param_types: Types.IndexRange, // types of parameters. the length of this array is equal to the param_count field of FunctionInstance
+};
+const FunctionInstancePseudoKey = struct {
+    name: []const u8,
+    param_types: []DkType,
+};
+
+const FunctionInstanceHashContext = struct {
+    types: *Types, // needed to resolve the type enums in the keys to actual types for hashing and equality checks
+
+    fn combineHash(h: u64, t: DkType) u64 {
+        return h ^ (@as(u64, @intFromEnum(t)) +% 0x9e3779b9 +% (h << 6) +% (h >> 2)); // from boost's hash_combine function
+    }
+
+    fn hashFunctionInstanceKey(ctx: FunctionInstanceHashContext, key: FunctionInstanceKey) u64 {
+        var h = std.hash_map.hashString(key.name);
+        var it = key.param_types.iterator();
+        while (it.next()) |i| {
+            const t = ctx.types.get(i);
+            h = combineHash(h, t);
+        }
+
+        return h;
+    }
+
+    fn hashFunctionInstancePseudoKey(ctx: FunctionInstanceHashContext, key: FunctionInstancePseudoKey) u64 {
+        _ = ctx;
+        var h = std.hash_map.hashString(key.name);
+        for (key.param_types) |t| {
+            h = combineHash(h, t);
+        }
+
+        return h;
+    }
+
+    pub fn hash(ctx: FunctionInstanceHashContext, key: anytype) u32 {
+        return @intCast(0xffffffff & switch (@TypeOf(key)) {
+            FunctionInstanceKey => ctx.hashFunctionInstanceKey(key),
+            FunctionInstancePseudoKey => ctx.hashFunctionInstancePseudoKey(key),
+            else => unreachable,
+        });
+    }
+
+    pub fn eql(ctx: FunctionInstanceHashContext, a: anytype, b: FunctionInstanceKey, index : usize) bool {
+        _ = index;
+        switch (@TypeOf(a)) {
+            FunctionInstanceKey => return ctx.eqlKey(a, b),
+            FunctionInstancePseudoKey => return ctx.eqlPseudoKey(a, b),
+            else => unreachable,
+        }
+    }
+
+    fn eqlPseudoKey(ctx: FunctionInstanceHashContext, a: FunctionInstancePseudoKey, b: FunctionInstanceKey) bool {
+        if (a.param_types.len != b.param_types.len())
+            return false;
+
+        if (!std.mem.eql(u8, a.name, b.name))
+            return false;
+
+        for (a.param_types, ctx.types.sliceFromRange(b.param_types)) |a_type, b_type| {
+            if (b_type != a_type)
+                return false;
+        }
+
+        return true;
+    }
+
+    fn eqlKey(ctx: FunctionInstanceHashContext, a: FunctionInstanceKey, b: FunctionInstanceKey) bool {
+        if (a.param_types.len() != b.param_types.len())
+            return false;
+
+        if (!std.mem.eql(u8, a.name, b.name))
+            return false;
+
+        for (ctx.types.sliceFromRange(a.param_types), ctx.types.sliceFromRange(b.param_types)) |a_type, b_type| {
+            if (b_type != a_type)
+                return false;
+        }
+
+        return true;
+    }
+};
+
+const FunctionInstances = struct {
+    // hash_map: std.hash_map.HashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext, 75),
+    hash_map: HashMap,
+    gpa: std.mem.Allocator,
+    param_types: Types,
+
+    const HashMap = std.ArrayHashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext,true);
+    const Index = usize;
+
+    const CTX = FunctionInstanceHashContext;
+
+    pub fn init( gpa: std.mem.Allocator) !FunctionInstances {
+        return FunctionInstances{
+            .hash_map = .empty,
+            .gpa = gpa,
+            .param_types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
+        };
+    }
+
+    pub fn deinit(self: *FunctionInstances) void {
+        self.hash_map.deinit(self.gpa);
+        self.param_types.deinit();
+    }
+
+    pub fn getPtr(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?*const FunctionInstance {
+        return self.hash_map.getPtrAdapted(key, CTX{.types=&self.param_types});
+    }
+
+    pub fn get(self: *FunctionInstances, key: FunctionInstancePseudoKey) ?FunctionInstance {
+        return self.hash_map.getAdapted(key, CTX{.types=&self.param_types});
+    }
+
+    pub fn getByIndex(self: *const FunctionInstances, index: Index) FunctionInstance {
+        return self.hash_map.entries.get(index).value;
+    }
+
+    pub fn contains(self: *FunctionInstances, key: FunctionInstancePseudoKey) bool {
+        return self.hash_map.containsAdapted(key, CTX{.types=&self.param_types});
+    }
+
+    pub fn put(self: *FunctionInstances, key: FunctionInstanceKey, value: FunctionInstance) !HashMap.GetOrPutResult {
+        const res = try self.hash_map.getOrPutContextAdapted(self.gpa, key, CTX{.types=&self.param_types}, CTX{.types=&self.param_types});
+        assert(!res.found_existing);
+        res.value_ptr.* = value;
+        return res;
+    }
+};
+const FunctionInstanceIndex = FunctionInstances.Index;
+
+const FunctionInfos = struct {
+    templates: FunctionTemplates,
+    params: FunctionParams,
+    instances: FunctionInstances,
+    // instance_param_types: Types,
+
+    pub fn init(gpa: std.mem.Allocator) !FunctionInfos {
+        return FunctionInfos{
+            .templates = try .initWithNullElement(gpa, 32, FunctionTemplate.null_element),
+            .params = try .init(gpa, 128),
+            .instances = try .init(gpa),
+        };
+    }
+
+    pub fn deinit(self: *FunctionInfos) void {
+        self.templates.deinit();
+        self.params.deinit();
+        self.instances.deinit();
+    }
+
+    pub fn paramTypesOfInstance(self: *const FunctionInfos, instance: FunctionInstance) []const DkType {
+        assert(instance.first_param_type_idx != .NONE);
+        return self.instances.param_types.slice(instance.first_param_type_idx, instance.param_count);
+    }
+};
+
+
+// -----------------------------------------------------------------------
+
 // pub fn printAstBranchWithTypes(p: *const Parser, writer: *std.Io.Writer, node_types: []DkType, ast_index: AstNodeIndex, indentation: usize) !void {
 //     try writer.splatByteAll(' ', 4 * indentation);
 
@@ -1584,7 +1603,7 @@ test "TypeInferer" {
         \\fn do_zins(prev_val, zins)
         \\    result = prev_val * zins
         \\
-        \\fn zinseszins(initial, zins, jahre)
+        \\fn zinseszins(initial, zins, jahre) 
         \\      result = initial
         \\      jahr := 0
         \\      while jahr < jahre
@@ -1593,9 +1612,8 @@ test "TypeInferer" {
         \\
         \\fn main()
         \\    jahr := 0
-        \\    zins := 1 # 1.02
+        \\    zins := 1.02
         \\    result = zinseszins(1000.0, zins, 10)
-        \\    
     ;
 
     var stdout_buff: [1024]u8 = undefined;
@@ -1624,8 +1642,11 @@ test "TypeInferer" {
 
     std.debug.print("ast nodes: {}\n", .{parser.ast.nodes.items.len});
 
-    if (parser.errors.items.len > 0)
+    if (parser.errors.items.len > 0) {
+        try stdout.writeAll("\nError in the parsing stage:\n");
         try parser.printErrors(stdout, ts);
+        return;
+    }
 
     // try parser.printAstBranch(stdout, parser.root_node, 1);
     // try stdout.flush();
@@ -1636,7 +1657,7 @@ test "TypeInferer" {
 
     try std.testing.expect(parser.ast.equals(snapshot));
     ti.checkAndReconstructTypes(parser.root_node) catch |err| {
-        try stdout.print("\nError at type inference stage: {}\n", .{err});
+        try stdout.print("\nError in the type inference stage: {}\n", .{err});
         
     };
     try ti.printErrors(stdout, ts);
