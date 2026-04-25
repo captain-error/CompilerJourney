@@ -4,44 +4,43 @@ const type_inference = @import("type_inference.zig");
 
 const DkType = type_inference.DkType;
 
-const ScopeIndex = u29;
-const StamentIndex = u31;
-const ExpressionIndex = u32;
-const VarDeclIndex = u30;
-const FnDeclIndex = u28;
+pub const ScopeIndex = u29;
+pub const StamentIndex = u31;
+pub const ExpressionIndex = u32;
+pub const VarDeclIndex = u30;
+pub const FnDeclIndex = u28;
 
-fn IndexRange(IndexType : type) type {
+pub fn IndexRange(IndexType: type) type {
     return struct {
         start: IndexType = 0,
         end: IndexType = 0,
     };
 }
 
-
-const Scope = struct {
+pub const Scope = struct {
     kind: enum(u8) { INVALID = 0, FN, IF, ELSE, WHILE } = .INVALID,
     parent_scope: ScopeIndex = 0,
     first_statement: StamentIndex = 0, // linked list of statements in this scope (linked via next_sibling)
     first_decl: VarDeclIndex = 0, // linked list of variable declarations in this scope (linked via next_sibling)
 };
 
-const VarDecl = struct {
-    name: []const u8 = &{}, // arena allocated
-    type_: DkType = .INVALID,
-    kind: enum(u8) { VAR, RESULT, FN_PARAM },
+pub const VarDecl = struct {
+    name: []const u8 = "", // arena allocated
+    type_: DkType = .UNKNOWN,
+    kind: enum(u8) { VAR, RESULT, FN_PARAM } = .VAR,
     parent_scope: ScopeIndex = 0,
     next_sibling: VarDeclIndex = 0,
 };
 
-const FnDecl = struct {
-    name: []const u8 = &{}, // arena allocated
-    return_type: DkType = .INVALID,
+pub const FnDecl = struct {
+    name: []const u8 = "", // arena allocated
+    return_type: DkType = .UNKNOWN,
     params: IndexRange(VarDeclIndex) = .{},
     body_scope: ScopeIndex = 0,
 };
 
-const Expression = struct {
-    type_: DkType = .INVALID,
+pub const Expression = struct {
+    type_: DkType = .UNKNOWN,
     next_sibling: ExpressionIndex = 0,
     kind: union(enum) {
         INVALID: void,
@@ -86,7 +85,7 @@ const Expression = struct {
     } = .INVALID,
 };
 
-const Statement = struct {
+pub const Statement = struct {
     next_sibling: StamentIndex = 0,
     kind: union(enum) {
         INVALID: void,
@@ -117,8 +116,8 @@ const Statement = struct {
     } = .INVALID,
 };
 
-const FtAst = struct {
-     // zig fmt: off
+pub const FtAst = struct {
+    // zig fmt: off
     fn_decls:     std.ArrayList(FnDecl),
     scopes:       std.ArrayList(Scope),
     var_decls:    std.ArrayList(VarDecl),
@@ -136,11 +135,11 @@ const FtAst = struct {
         var res = FtAst{
             .gpa = gpa,
             .arena = .init(gpa),
-            .scopes            = .initCapacity(gpa, 1024),
-            .fn_decls         = .initCapacity(gpa, 256),   
-            .var_decls       = .initCapacity(gpa, 1024),
-            .statements    = .initCapacity(gpa, 1024),
-            .expressions  = .initCapacity(gpa, 1024),
+            .scopes      = try .initCapacity(gpa, 1024),
+            .fn_decls    = try .initCapacity(gpa, 256),
+            .var_decls   = try .initCapacity(gpa, 1024),
+            .statements  = try .initCapacity(gpa, 1024),
+            .expressions = try .initCapacity(gpa, 1024),
         };
 
         res.scopes     .appendAssumeCapacity(.{}); // reserve index 0 for invalid scope  

@@ -1317,7 +1317,7 @@ pub const TypeInferer = struct {
 // -----------------------------------------------------------------------
 
 
-const FunctionTemplate = struct {
+pub const FunctionTemplate = struct {
     ast_idx: AstNodeIndex,
     body_ast_idx: AstNodeIndex,
     first_param_idx: FunctionParams.Index = .NONE,
@@ -1362,7 +1362,7 @@ const FunctionTemplate = struct {
 
 const TypeVarId = u8; // FIXME
 
-const FunctionParam = struct {
+pub const FunctionParam = struct {
     name_token_idx: TokenIndex = 0,
     type_: union(enum) {
         CONCRETE: DkType,
@@ -1370,11 +1370,11 @@ const FunctionParam = struct {
     } = .{ .CONCRETE = .UNKNOWN },
 };
 
-const FunctionTemplates = util.ArrayList(FunctionTemplate);
-const FunctionParams = util.ArrayList(FunctionParam);
-const Types = util.ArrayList(DkType);
+pub const FunctionTemplates = util.ArrayList(FunctionTemplate);
+pub const FunctionParams = util.ArrayList(FunctionParam);
+pub const Types = util.ArrayList(DkType);
 
-const FunctionInstance = struct {
+pub const FunctionInstance = struct {
     name_: union(enum) {
         builtin: []const u8,
         user_defined: AstNodeIndex, // index of function head in ast
@@ -1397,17 +1397,17 @@ const FunctionInstance = struct {
     }
 };
 
-const FunctionInstanceKey = struct {
+pub const FunctionInstanceKey = struct {
     name: []const u8,
     param_types: Types.IndexRange, // types of parameters. the length of this array is equal to the param_count field of FunctionInstance
 };
-const FunctionInstancePseudoKey = struct {
+pub const FunctionInstancePseudoKey = struct {
     name: []const u8,
     param_types: []DkType,
 };
 
-const FunctionInstanceHashContext = struct {
-    types: *Types, // needed to resolve the type enums in the keys to actual types for hashing and equality checks
+pub const FunctionInstanceHashContext = struct {
+    types: *const Types, // needed to resolve the type enums in the keys to actual types for hashing and equality checks
 
     fn combineHash(h: u64, t: DkType) u64 {
         return h ^ (@as(u64, @intFromEnum(t)) +% 0x9e3779b9 +% (h << 6) +% (h >> 2)); // from boost's hash_combine function
@@ -1482,14 +1482,14 @@ const FunctionInstanceHashContext = struct {
     }
 };
 
-const FunctionInstances = struct {
+pub const FunctionInstances = struct {
     // hash_map: std.hash_map.HashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext, 75),
     hash_map: HashMap,
     gpa: std.mem.Allocator,
     param_types: Types,
 
-    const HashMap = std.ArrayHashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext,true);
-    const Index = usize;
+    pub const HashMap = std.ArrayHashMapUnmanaged(FunctionInstanceKey, FunctionInstance, FunctionInstanceHashContext,true);
+    pub const Index = usize;
 
     const CTX = FunctionInstanceHashContext;
 
@@ -1522,16 +1522,21 @@ const FunctionInstances = struct {
         return self.hash_map.containsAdapted(key, CTX{.types=&self.param_types});
     }
 
+    pub fn getIndex(self: *const FunctionInstances, key: FunctionInstancePseudoKey) ?Index {
+        return self.hash_map.getIndexAdapted(key, CTX{.types=&self.param_types});
+    }
+
     pub fn put(self: *FunctionInstances, key: FunctionInstanceKey, value: FunctionInstance) !HashMap.GetOrPutResult {
         const res = try self.hash_map.getOrPutContextAdapted(self.gpa, key, CTX{.types=&self.param_types}, CTX{.types=&self.param_types});
         assert(!res.found_existing);
+        res.key_ptr.* = key;
         res.value_ptr.* = value;
         return res;
     }
 };
 const FunctionInstanceIndex = FunctionInstances.Index;
 
-const FunctionInfos = struct {
+pub const FunctionInfos = struct {
     templates: FunctionTemplates,
     params: FunctionParams,
     instances: FunctionInstances,

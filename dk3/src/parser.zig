@@ -626,7 +626,12 @@ pub const Parser = struct {
                 // zig fmt: off
                 .END_BLOCK, .EOF => break :loop,
                 .EOL, .SEMICOLON  => p.next(), // ignore
-
+                .INVALID_INDENT => { // we should probably handle this in the tokenizer already
+                    try p.emitError(p.token_idx, "statement");
+                    p.advanceTillEoStatement();
+                    p.next();
+                    p.next();
+                },
                 else => {
                     // std.debug.print("token.tag={}\n", .{ @tagName(token.tag) });
                     const node_idx = try p.parseStatement();

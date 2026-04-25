@@ -106,7 +106,7 @@ pub fn GenericTree(Node: type) type {
 
             pub fn appendExisting(ll: *LinkedList, node_idx: NodeIndex) !void {
                 // std.debug.print("append START:{any}\n", .{ll.ed.data.items});
-                assert(node_idx != 0);
+                // assert(node_idx != 0);
                 assert(ll.tree.get(node_idx).next_sibling == 0);
 
                 if (ll.index) |prev_elem_i| {
