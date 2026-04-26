@@ -4,6 +4,36 @@ const type_inference = @import("type_inference.zig");
 
 const DkType = type_inference.DkType;
 
+pub const BinaryOp = enum {
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    POW, //
+    EQ,
+    NEQ,
+    LT,
+    LE,
+    GT,
+    GE, //
+    BOOL_AND,
+    BOOL_OR,
+    BOOL_XOR, //
+};
+
+pub const UnaryOp = enum {
+    NEGATE,
+    BOOL_NOT,
+};
+
+pub const AssignmentKind = enum {
+    ASSIGN,
+    PLUS,
+    MINUS,
+    MULT,
+    DIV,
+};
+
 pub const ScopeIndex = u29;
 pub const StamentIndex = u31;
 pub const ExpressionIndex = u32;
@@ -52,30 +82,12 @@ pub const Expression = struct {
             boolean: bool,
         },
         BINARY_OP: struct {
-            op: enum {
-                ADD,
-                SUB,
-                MUL,
-                DIV,
-                POW, //
-                EQ,
-                NEQ,
-                LT,
-                LE,
-                GT,
-                GE, //
-                BOOL_AND,
-                BOOL_OR,
-                BOOL_XOR, //
-            },
+            op: BinaryOp,
             lhs: ExpressionIndex,
             rhs: ExpressionIndex,
         },
         UNARY_OP: struct {
-            op: enum {
-                NEGATE,
-                BOOL_NOT,
-            },
+            op: UnaryOp,
             operand: ExpressionIndex,
         },
         FN_CALL: struct {
@@ -96,7 +108,7 @@ pub const Statement = struct {
         ASSIGNMENT: struct {
             var_decl_idx: VarDeclIndex,
             type_: DkType,
-            kind: enum { ASSIGN, PLUS, MINUS, MULT, DIV },
+            kind: AssignmentKind,
             rhs: ExpressionIndex,
         },
         RESULT_ASSIGN: struct {

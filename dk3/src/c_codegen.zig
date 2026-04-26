@@ -16,8 +16,8 @@ const FnDeclIndex = ft_ast.FnDeclIndex;
 
 const DkType = type_inference.DkType;
 
-const BinaryOp = @FieldType(@FieldType(@FieldType(Expression, "kind"), "BINARY_OP"), "op");
-const AssignmentKind = @FieldType(@FieldType(@FieldType(Statement, "kind"), "ASSIGNMENT"), "kind");
+const BinaryOp = ft_ast.BinaryOp;
+const AssignmentKind = ft_ast.AssignmentKind;
 
 const Writer = std.Io.Writer;
 

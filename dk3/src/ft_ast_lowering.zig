@@ -39,14 +39,9 @@ const FnDeclIndex = ft_ast.FnDeclIndex;
 const MAX_NUM_FUNCTION_PARAMS = 32;
 
 const ScopeKind = @FieldType(Scope, "kind");
-const ExprKind = @FieldType(Expression, "kind");
-const BinaryOpPayload = @FieldType(ExprKind, "BINARY_OP");
-const BinaryOp = @FieldType(BinaryOpPayload, "op");
-const UnaryOpPayload = @FieldType(ExprKind, "UNARY_OP");
-const UnaryOp = @FieldType(UnaryOpPayload, "op");
-const StmtKind = @FieldType(Statement, "kind");
-const AssignmentPayload = @FieldType(StmtKind, "ASSIGNMENT");
-const AssignmentKind = @FieldType(AssignmentPayload, "kind");
+const BinaryOp = ft_ast.BinaryOp;
+const UnaryOp = ft_ast.UnaryOp;
+const AssignmentKind = ft_ast.AssignmentKind;
 
 pub fn lower(
     gpa: std.mem.Allocator,
