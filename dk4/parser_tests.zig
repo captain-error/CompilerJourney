@@ -163,6 +163,37 @@ test "parse function declaration with explicit types and default args" {
     try testParser(source, Parser.parseFnDecl, expected, false);
 }
 
+test "parse function declaration with complex params" {
+    const source =
+        \\fn add(a : Float,
+        \\       b,
+        \\       c := 7,
+        \\       d : Int = 3
+        \\)
+        \\  return c + d
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "c", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "7" } },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "d", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+        },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "c" }, //
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "d" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
 // test "parse function declaration with concrete parameter types" {
 //     const source =
 //         \\fn add(a: Float, b: Float)

@@ -138,6 +138,20 @@ pub const Parser = struct {
         p.token_idx += 1;
     }
 
+    fn skip(p: *Parser, tags : anytype) void {
+        var skipped = true;
+
+        while(skipped)        {
+            skipped = false;
+            inline for (tags) |tag| {
+                if (p.peek(0).tag == tag) {
+                    p.next();
+                    skipped = true;
+                }
+            }
+        }
+    }
+
     // fn addNode(p: *Parser, node: AstNode) !AstNodeIndex {
     //     // std.debug.print("addNode: {any} token={any}\n", .{ node, p.tokens[node.token_index] });
     //     const index: AstNodeIndex = @intCast(p.ast.nodes.items.len);
@@ -297,24 +311,28 @@ pub const Parser = struct {
         p.next();
         var param_list = p.ast.startList();
 
+        // while(true) {
+        //     switch(p.peek(0).tag) {
+        //         .EOL, .BEGIN_BLOCK, .END_BLOCK => {
+        //             p.next();
+        //             continue;
+        //         },
+        //         else => break,
+        //     }
+        // }
+
         while (p.peek(0).tag != .RPAREN) {
+            p.skip(.{ .EOL, .BEGIN_BLOCK, .END_BLOCK });
+            
             if (!try p.expectToken(.IDENTIFIER)) 
                 return error.UnexpectedToken;
-
             const param_idx = try p.parseStructMemberOrParam(.PARAM);
             try param_list.appendExisting(param_idx);
+
+            p.skip(.{ .EOL, .BEGIN_BLOCK, .END_BLOCK });
+
             if (p.peek(0).tag != .COMMA) break;
             p.next();
-
-            // const param_token_idx = p.token_idx;
-            // try param_list.appendExisting(try p.ast.append(.{
-            //     .tag = .ATOM,
-            //     .token_index = param_token_idx,
-            // }));
-            // p.next();
-
-            // if (p.peek(0).tag != .COMMA) break;
-            // p.next();
         }
 
         if (!try p.expectToken(.RPAREN))
