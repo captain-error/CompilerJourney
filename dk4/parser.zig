@@ -61,6 +61,7 @@ pub const AstNodeTag = enum(u8) {
     UNARY_OP, // 1 child
     FNDECL, // 2 children: param list, body
     FNPARAMS, // arbitrary many children
+    PARAM, // token_index = param name IDENT. children: [optional TYPE, optional default value]
     RETURN, // 1 child: return value (expression)
     CALL_OR_INST, // N children: positional exprs and/or NAMED_ARGs. Python-style: after first named, all must be named.
     NAMED_ARG, // token_index = field name IDENT. 1 child: value expression.
@@ -68,8 +69,8 @@ pub const AstNodeTag = enum(u8) {
     BLOCK, // arbitrary many children
     ATOM, // no child
     IF, // 3 children: condition, then, else
-    STRUCTDECL, // token_index = struct name IDENT. children: member nodes (DECLARATION or STRUCT_MEMBER_BARE)
-    STRUCT_MEMBER_BARE, // token_index = member name IDENT. 0 children. (generic type param)
+    STRUCTDECL, // token_index = struct name IDENT. children: MEMBER nodes
+    MEMBER, // token_index = member name IDENT. 0..=2 children. (in struct decl: optional TYPE, optional default value.)
     TYPE, // token_index = type name IDENT. 0 children (for now).
     MEMBER_ACCESS, // token_index = field name IDENT. 1 child: object expression.
 };
@@ -300,15 +301,20 @@ pub const Parser = struct {
             if (!try p.expectToken(.IDENTIFIER)) 
                 return error.UnexpectedToken;
 
-            const param_token_idx = p.token_idx;
-            try param_list.appendExisting(try p.ast.append(.{
-                .tag = .ATOM,
-                .token_index = param_token_idx,
-            }));
-            p.next();
-
+            const param_idx = try p.parseStructMemberOrParam(.PARAM);
+            try param_list.appendExisting(param_idx);
             if (p.peek(0).tag != .COMMA) break;
             p.next();
+
+            // const param_token_idx = p.token_idx;
+            // try param_list.appendExisting(try p.ast.append(.{
+            //     .tag = .ATOM,
+            //     .token_index = param_token_idx,
+            // }));
+            // p.next();
+
+            // if (p.peek(0).tag != .COMMA) break;
+            // p.next();
         }
 
         if (!try p.expectToken(.RPAREN))
@@ -422,50 +428,92 @@ pub const Parser = struct {
 
         var member_list = p.ast.startList();
 
-        while (p.peek(0).tag != .END_BLOCK and p.peek(0).tag != .EOF) {
-            if (p.peek(0).tag == .EOL) {
-                p.next();
-                continue;
+        member_loop: while (true) {
+            assert(p.peek(0).tag != .EOF);
+            // p.peek(0).tag != .END_BLOCK
+            switch (p.peek(0).tag) {
+                .END_BLOCK => {
+                    p.next();
+                    break :member_loop;
+                },
+                .EOL, .SEMICOLON => {
+                    p.next();
+                    continue :member_loop;
+                },
+                .IDENTIFIER => {
+                    const member_idx = try p.parseStructMemberOrParam(.MEMBER);
+                    try member_list.appendExisting(member_idx);
+                    if (!try p.expectEndOfStatement())
+                        return error.UnexpectedToken;
+                    p.next();
+                },
+                else => {
+                    try p.emitError(p.token_idx, "struct member declaration");
+                    p.advanceTillEoStatement();
+                    continue :member_loop;
+                },
             }
-
-            const member_idx = try p.parseStructMember();
-            try member_list.appendExisting(member_idx);
         }
-
-        if (!try p.expectToken(.END_BLOCK))
-            return error.UnexpectedToken;
-        p.next();
 
         p.ast.get(node_idx).first_child = member_list.start_index;
         return node_idx;
     }
 
-    fn parseStructMember(p: *Parser) InternalParserError!AstNodeIndex {
+    ///   x                --> MEMBER/PARAM(x)
+    ///   x : = expr       --> MEMBER/PARAM(x), children: [expr]
+    ///   x : Type = expr  --> MEMBER/PARAM(x), children: [TYPE(Type), expr]
+    ///   x : Type         --> MEMBER/PARAM(x), children: [TYPE(Type)]
+    fn parseStructMemberOrParam(p: *Parser, tag : AstNodeTag) InternalParserError!AstNodeIndex {
         if (!try p.expectToken(.IDENTIFIER))
             return error.UnexpectedToken;
 
         const ident_token_idx = p.token_idx;
         p.next();
 
-        // bare member: just IDENT followed by end-of-statement
-        switch (p.peek(0).tag) {
-            .EOL, .SEMICOLON, .END_BLOCK, .EOF => {
-                if (p.peek(0).tag == .EOL or p.peek(0).tag == .SEMICOLON)
-                    p.next();
-                return p.ast.append(.{
-                    .tag = .STRUCT_MEMBER_BARE,
-                    .token_index = ident_token_idx,
-                });
-            },
-            .COLON => {
-                p.next();
-                return p.parseDeclaration(ident_token_idx);
-            },
-            else => {
-                try p.emitError(p.token_idx, "':' or end of line");
-                return error.UnexpectedToken;
-            },
+        const node_idx = try p.ast.append(.{
+            .tag = tag,
+            .token_index = ident_token_idx,
+        });
+
+        // improve error message for missing colon:
+        if (p.peek(0).tag == .ASSIGN) {
+            try p.emitError(p.token_idx, "':'");
+            return error.UnexpectedToken;
         }
+        
+        if (p.peek(0).tag == .COLON) {
+            p.next();
+            switch (p.peek(0).tag) {
+                .ASSIGN => {
+                    // x : = expr (no type)
+                    p.next();
+                    const rhs = try p.parseExpression();
+                    p.ast.get(node_idx).first_child = rhs;
+                },
+                .IDENTIFIER => {
+                    // x : Type ...
+                    const type_idx = try p.ast.append(.{
+                        .tag = .TYPE,
+                        .token_index = p.token_idx,
+                    });
+                    p.next();
+                    p.ast.get(node_idx).first_child = type_idx;
+
+                    if (p.peek(0).tag == .ASSIGN) {
+                        // x : Type = expr
+                        p.next();
+                        const rhs = try p.parseExpression();
+                        p.ast.get(type_idx).next_sibling = rhs;
+                    }
+                },
+                else => {
+                    try p.emitError(p.token_idx, "type name or '='");
+                    return error.UnexpectedToken;
+                },
+            }
+        }
+
+        return node_idx;
     }
 
     pub fn parseExpression(p: *Parser) InternalParserError!AstNodeIndex {
@@ -661,7 +709,11 @@ pub const Parser = struct {
         // COLON → declaration (with optional type)
         if (p.peek(0).tag == .COLON) {
             p.next();
-            return p.parseDeclaration(ident_token_idx);
+            const decl = try p.parseDeclaration(ident_token_idx);
+            if (!try p.expectEndOfStatement())
+                return error.UnexpectedToken;
+            p.next();
+            return decl;
         }
 
         // Assignment operators
@@ -734,9 +786,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-        if (!try p.expectEndOfStatement())
-            return error.UnexpectedToken;
-        p.next();
+       
 
         return node_idx;
     }

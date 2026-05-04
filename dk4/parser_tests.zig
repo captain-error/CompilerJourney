@@ -37,7 +37,8 @@ fn testAstStructure(ast: *const AST) void {
             .RETURN           => assert(num_kids == 1),
             .FNDECL           => assert(num_kids == 2),
             .STRUCTDECL       => {},
-            .STRUCT_MEMBER_BARE => assert(num_kids == 0),
+            .MEMBER           => {assert(num_kids >= 0); assert(num_kids <= 2);},
+            .PARAM            => {assert(num_kids >= 0); assert(num_kids <= 2);},
             .TYPE             => assert(num_kids == 0),
             .MEMBER_ACCESS    => assert(num_kids == 1),
             // zig fmt: on
@@ -71,8 +72,8 @@ test "parse function declaration 2" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
-            .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a" },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -86,6 +87,106 @@ test "parse function declaration 2" {
     };
     try testParser(source, Parser.parseFnDecl, expected, false);
 }
+
+test "parse function declaration with default parameter values" {
+    const source =
+        \\fn add(a:=1, b:=3)
+        \\  return a + b
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+        },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
+test "parse function declaration with explicit types" {
+    const source =
+        \\fn add(a : Float, b: Float)
+        \\  return a + b
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+        },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
+test "parse function declaration with explicit types and default args" {
+    const source =
+        \\fn add(a : Float = 1, b: Float = 3)
+        \\  return a + b
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
+            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+        },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
+// test "parse function declaration with concrete parameter types" {
+//     const source =
+//         \\fn add(a: Float, b: Float)
+//         \\  return a + b
+//     ;
+//     const expected = .{
+//         AstNodeTag.FNDECL, "add",
+//         .{
+//             AstNodeTag.FNPARAMS,
+//             .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
+//             .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+//         },
+//         .{
+//             AstNodeTag.BLOCK, .{
+//                 AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
+//                     AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+//                     .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
+//                     .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+//                 },
+//             },
+//         },
+//     };
+//     try testParser(source, Parser.parseFnDecl, expected, false);
+// }
 
 test "parse mini program" {
         const source =
@@ -482,6 +583,214 @@ test "AST vs reference" {
     try testParser(src, Parser.parserDeclOrAssign, expected, false);
 }
 
+
+test "parse struct declaration" {
+    const source =
+        \\struct Car
+        \\    velocity := 0.0
+        \\    gear : Int
+        \\    some_val
+        \\    name : Int = 42
+    ;
+    const expected = .{
+        AstNodeTag.STRUCTDECL, "Car",
+        .{ AstNodeTag.MEMBER, "velocity", .{ AstNodeTag.ATOM, "0.0" } },
+        .{ AstNodeTag.MEMBER, "gear", .{ AstNodeTag.TYPE, "Int" } },
+        .{ AstNodeTag.MEMBER, "some_val" },
+        .{ AstNodeTag.MEMBER, "name", .{ AstNodeTag.TYPE, "Int" }, .{ AstNodeTag.ATOM, "42" } },
+    };
+    try testParser(source, Parser.parseStructDecl, expected, false);
+}
+
+test "parse named args" {
+    const source = "Car(gear=3, name=42)";
+    const expected = .{
+        AstNodeTag.CALL_OR_INST, "Car",
+        .{ AstNodeTag.NAMED_ARG, "gear", .{ AstNodeTag.ATOM, "3" } },
+        .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
+    };
+    try testParser(source, Parser.parseCallOrInst, expected, false);
+}
+
+test "parse mixed positional and named args" {
+    const source = "foo(1, 2, name=42)";
+    const expected = .{
+        AstNodeTag.CALL_OR_INST, "foo",
+        .{ AstNodeTag.ATOM, "1" },
+        .{ AstNodeTag.ATOM, "2" },
+        .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
+    };
+    try testParser(source, Parser.parseCallOrInst, expected, false);
+}
+
+test "parse member access read" {
+    const source = "s.velocity + 1";
+    const expected = .{
+        AstNodeTag.BINARY_OP, "+",
+        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
+        .{ AstNodeTag.ATOM, "1" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse chained member access" {
+    const source = "a.b.c";
+    const expected = .{
+        AstNodeTag.MEMBER_ACCESS, "c",
+        .{ AstNodeTag.MEMBER_ACCESS, "b", .{ AstNodeTag.ATOM, "a" } },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse member assignment" {
+    const source = "s.gear = 4\n";
+    const expected = .{
+        AstNodeTag.ASSIGNMENT, "=",
+        .{ AstNodeTag.MEMBER_ACCESS, "gear", .{ AstNodeTag.ATOM, "s" } },
+        .{ AstNodeTag.ATOM, "4" },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse member compound assignment" {
+    const source = "s.velocity += 0.5\n";
+    const expected = .{
+        AstNodeTag.ASSIGNMENT, "+=",
+        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
+        .{ AstNodeTag.ATOM, "0.5" },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse typed declaration" {
+    const source = "x : Int = 3\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "x",
+        .{ AstNodeTag.TYPE, "Int" },
+        .{ AstNodeTag.ATOM, "3" },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse declaration without type" {
+    const source = "x := 3\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "x",
+        .{ AstNodeTag.ATOM, "3" },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse struct in program" {
+    const source =
+        \\struct Point
+        \\    x : Float
+        \\    y : Float
+        \\
+        \\fn main()
+        \\    p := Point(x=1.0, y=2.0)
+        \\    p.x += 0.5
+    ;
+    const expected = .{
+        AstNodeTag.BLOCK,
+        .{
+            AstNodeTag.STRUCTDECL, "Point",
+            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" } },
+            .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" } },
+        },
+        .{
+            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
+                AstNodeTag.BLOCK,
+                .{
+                    AstNodeTag.DECLARATION, "p",
+                    .{
+                        AstNodeTag.CALL_OR_INST, "Point",
+                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "1.0" } },
+                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "2.0" } },
+                    },
+                },
+                .{
+                    AstNodeTag.ASSIGNMENT, "+=",
+                    .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
+                    .{ AstNodeTag.ATOM, "0.5" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parse, expected, false);
+}
+
+test "parse struct as function param" {
+    const source =
+        \\struct Point
+        \\    x : Float = 0.0
+        \\    y : Float = 0.0
+        \\
+        \\fn length(p)
+        \\    result = p.x * p.x + p.y * p.y
+        \\
+        \\fn main()
+        \\    pt := Point(x=3.0, y=4.0)
+        \\    result = length(pt)
+    ;
+    const expected = .{
+        AstNodeTag.BLOCK,
+        .{
+            AstNodeTag.STRUCTDECL, "Point",
+            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
+            .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
+        },
+        .{
+            AstNodeTag.FNDECL, "length", .{ AstNodeTag.FNPARAMS,
+                .{ AstNodeTag.PARAM, "p" },
+            }, .{
+                AstNodeTag.BLOCK,
+                .{
+                    AstNodeTag.ASSIGNMENT, "=",
+                    .{ AstNodeTag.ATOM, "result" },
+                    .{
+                        AstNodeTag.BINARY_OP, "+",
+                        .{
+                            AstNodeTag.BINARY_OP, "*",
+                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
+                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
+                        },
+                        .{
+                            AstNodeTag.BINARY_OP, "*",
+                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
+                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
+                        },
+                    },
+                },
+            },
+        },
+        .{
+            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
+                AstNodeTag.BLOCK,
+                .{
+                    AstNodeTag.DECLARATION, "pt",
+                    .{
+                        AstNodeTag.CALL_OR_INST, "Point",
+                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "3.0" } },
+                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "4.0" } },
+                    },
+                },
+                .{
+                    AstNodeTag.ASSIGNMENT, "=",
+                    .{ AstNodeTag.ATOM, "result" },
+                    .{
+                        AstNodeTag.CALL_OR_INST, "length",
+                        .{ AstNodeTag.ATOM, "pt" },
+                    },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parse, expected, false);
+}
+
+
+
 /// Returns true if the passed type will coerce to []const u8.
 /// Any of the following are considered strings:
 /// ```
@@ -709,240 +1018,3 @@ fn testParser(source: []const u8, parse_func: anytype, expected_structure: anyty
     // try stdout.writeAll("\n---------------\n");
     try stdout.flush();
 }
-
-test "parse struct declaration" {
-    const source =
-        \\struct Car
-        \\    velocity := 0.0
-        \\    gear : Int
-        \\    some_val
-        \\    name : Int = 42
-    ;
-    const expected = .{
-        AstNodeTag.STRUCTDECL, "Car",
-        .{ AstNodeTag.DECLARATION, "velocity", .{ AstNodeTag.ATOM, "0.0" } },
-        .{ AstNodeTag.DECLARATION, "gear", .{ AstNodeTag.TYPE, "Int" } },
-        .{ AstNodeTag.STRUCT_MEMBER_BARE, "some_val" },
-        .{ AstNodeTag.DECLARATION, "name", .{ AstNodeTag.TYPE, "Int" }, .{ AstNodeTag.ATOM, "42" } },
-    };
-    try testParser(source, Parser.parseStructDecl, expected, false);
-}
-
-test "parse named args" {
-    const source = "Car(gear=3, name=42)";
-    const expected = .{
-        AstNodeTag.CALL_OR_INST, "Car",
-        .{ AstNodeTag.NAMED_ARG, "gear", .{ AstNodeTag.ATOM, "3" } },
-        .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
-    };
-    try testParser(source, Parser.parseCallOrInst, expected, false);
-}
-
-test "parse mixed positional and named args" {
-    const source = "foo(1, 2, name=42)";
-    const expected = .{
-        AstNodeTag.CALL_OR_INST, "foo",
-        .{ AstNodeTag.ATOM, "1" },
-        .{ AstNodeTag.ATOM, "2" },
-        .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
-    };
-    try testParser(source, Parser.parseCallOrInst, expected, false);
-}
-
-test "parse member access read" {
-    const source = "s.velocity + 1";
-    const expected = .{
-        AstNodeTag.BINARY_OP, "+",
-        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "1" },
-    };
-    try testParser(source, Parser.parseExpression, expected, false);
-}
-
-test "parse chained member access" {
-    const source = "a.b.c";
-    const expected = .{
-        AstNodeTag.MEMBER_ACCESS, "c",
-        .{ AstNodeTag.MEMBER_ACCESS, "b", .{ AstNodeTag.ATOM, "a" } },
-    };
-    try testParser(source, Parser.parseExpression, expected, false);
-}
-
-test "parse member assignment" {
-    const source = "s.gear = 4\n";
-    const expected = .{
-        AstNodeTag.ASSIGNMENT, "=",
-        .{ AstNodeTag.MEMBER_ACCESS, "gear", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "4" },
-    };
-    try testParser(source, Parser.parserDeclOrAssign, expected, false);
-}
-
-test "parse member compound assignment" {
-    const source = "s.velocity += 0.5\n";
-    const expected = .{
-        AstNodeTag.ASSIGNMENT, "+=",
-        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "0.5" },
-    };
-    try testParser(source, Parser.parserDeclOrAssign, expected, false);
-}
-
-test "parse typed declaration" {
-    const source = "x : Int = 3\n";
-    const expected = .{
-        AstNodeTag.DECLARATION, "x",
-        .{ AstNodeTag.TYPE, "Int" },
-        .{ AstNodeTag.ATOM, "3" },
-    };
-    try testParser(source, Parser.parserDeclOrAssign, expected, false);
-}
-
-test "parse declaration without type" {
-    const source = "x := 3\n";
-    const expected = .{
-        AstNodeTag.DECLARATION, "x",
-        .{ AstNodeTag.ATOM, "3" },
-    };
-    try testParser(source, Parser.parserDeclOrAssign, expected, false);
-}
-
-test "parse struct in program" {
-    const source =
-        \\struct Point
-        \\    x : Float
-        \\    y : Float
-        \\
-        \\fn main()
-        \\    p := Point(x=1.0, y=2.0)
-        \\    p.x += 0.5
-    ;
-    const expected = .{
-        AstNodeTag.BLOCK,
-        .{
-            AstNodeTag.STRUCTDECL, "Point",
-            .{ AstNodeTag.DECLARATION, "x", .{ AstNodeTag.TYPE, "Float" } },
-            .{ AstNodeTag.DECLARATION, "y", .{ AstNodeTag.TYPE, "Float" } },
-        },
-        .{
-            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
-                AstNodeTag.BLOCK,
-                .{
-                    AstNodeTag.DECLARATION, "p",
-                    .{
-                        AstNodeTag.CALL_OR_INST, "Point",
-                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "1.0" } },
-                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "2.0" } },
-                    },
-                },
-                .{
-                    AstNodeTag.ASSIGNMENT, "+=",
-                    .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
-                    .{ AstNodeTag.ATOM, "0.5" },
-                },
-            },
-        },
-    };
-    try testParser(source, Parser.parse, expected, false);
-}
-
-test "parse struct as function param" {
-    const source =
-        \\struct Point
-        \\    x : Float = 0.0
-        \\    y : Float = 0.0
-        \\
-        \\fn length(p)
-        \\    result = p.x * p.x + p.y * p.y
-        \\
-        \\fn main()
-        \\    pt := Point(x=3.0, y=4.0)
-        \\    result = length(pt)
-    ;
-    const expected = .{
-        AstNodeTag.BLOCK,
-        .{
-            AstNodeTag.STRUCTDECL, "Point",
-            .{ AstNodeTag.DECLARATION, "x", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
-            .{ AstNodeTag.DECLARATION, "y", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
-        },
-        .{
-            AstNodeTag.FNDECL, "length", .{
-                .{ AstNodeTag.ATOM, "p" },
-            }, .{
-                AstNodeTag.BLOCK,
-                .{
-                    AstNodeTag.ASSIGNMENT, "=",
-                    .{ AstNodeTag.ATOM, "result" },
-                    .{
-                        AstNodeTag.BINARY_OP, "+",
-                        .{
-                            AstNodeTag.BINARY_OP, "*",
-                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
-                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
-                        },
-                        .{
-                            AstNodeTag.BINARY_OP, "*",
-                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
-                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
-                        },
-                    },
-                },
-            },
-        },
-        .{
-            AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
-                AstNodeTag.BLOCK,
-                .{
-                    AstNodeTag.DECLARATION, "pt",
-                    .{
-                        AstNodeTag.CALL_OR_INST, "Point",
-                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "3.0" } },
-                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "4.0" } },
-                    },
-                },
-                .{
-                    AstNodeTag.ASSIGNMENT, "=",
-                    .{ AstNodeTag.ATOM, "result" },
-                    .{
-                        AstNodeTag.CALL_OR_INST, "length",
-                        .{ AstNodeTag.ATOM, "pt" },
-                    },
-                },
-            },
-        },
-    };
-    try testParser(source, Parser.parse, expected, false);
-}
-
-// test "Parser" {
-//     const source =
-//         \\ x := -5.0 # declaring and assigning a variable
-//         \\ x = 2.0  # assigning an existing variable
-//         \\ y := -x + -3 * - (-7 + -2) **-x
-//         \\ z := x ** y; p := 7.1
-//         \\ result := z + p**2
-//     ;
-
-//     var stdout_buff: [1024]u8 = undefined;
-//     var stdout_writer = std.fs.File.stdout().writer(&stdout_buff);
-//     const stdout = &stdout_writer.interface;
-
-//     const gpa = std.testing.allocator;
-
-//     var ts = try TokenStream.init(source, gpa);
-//     defer ts.deinit(gpa);
-
-//     // std.debug.print("tokens: {}\n", .{ts.tokens.len});
-
-//     var parser = try Parser.init(source, ts.tokens, gpa);
-//     defer parser.deinit();
-//     try parser.parse();
-//     // std.debug.print("ast nodes: {}\n", .{parser.ast.nodes.items.len});
-//     if (parser.hasErrors()) {
-//         try parser.printErrors(stdout, ts);
-//     }
-//     // try stdout.writeAll("AST:\n");
-//     // try parser.printAstBranch(stdout, parser.root_node, 1);
-//     // try stdout.flush();
-// }

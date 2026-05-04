@@ -408,7 +408,7 @@ const Resolver = struct {
 
     // -- Pass 2: build struct templates --
 
-    fn buildStructTemplate(r: *Resolver, _: AstNodeIndex, node: *AstNode, decl_idx: DeclIndex) !void {
+    fn buildStructTemplate(r: *Resolver, node_idx: AstNodeIndex, node: *AstNode, decl_idx: DeclIndex) !void {
         const first_member_idx: ParamsOrMembers.Index = @enumFromInt(r.di.params_or_members.items.len);
         var member_count: u8 = 0;
         var typevar_count: u8 = 0;
@@ -427,60 +427,56 @@ const Resolver = struct {
                 }
             }
 
-            switch (member_node.tag) {
-                .STRUCT_MEMBER_BARE => {
-                    _ = try r.di.params_or_members.append(.{
+            assert(member_node.tag == .MEMBER);
+
+            const first_child_idx = member_node.first_child;
+            if (first_child_idx == 0) {
+                _ = try r.di.params_or_members.append(.{
                         .name_token_idx = member_node.token_index,
                         .type_ = .{ .TYPEVAR = typevar_count },
                         .default_ast_idx = 0,
                     });
-                    typevar_count += 1;
-                    member_count += 1;
-                },
-                .DECLARATION => {
-                    // Check children: first child could be TYPE or expr
-                    const first_child_idx = member_node.first_child;
-                    if (first_child_idx == 0) {
-                        // shouldn't happen from parser, but just in case
-                        unreachable;
-                    }
+                typevar_count += 1;
+                member_count += 1;
+            }
+            else {
+                // Check children: first child could be TYPE or expr
 
-                    const first_child = r.ast.get(first_child_idx);
-                    if (first_child.tag == .TYPE) {
-                        // has type annotation — resolve via symbol table
-                        const type_decl = r.resolveTypeAnnotation(first_child.token_index) orelse {
-                            try r.addError(.{ .undecl_var = first_child.token_index });
-                            member_count += 1;
-                            continue;
-                        };
-                        const default_idx = first_child.next_sibling; // 0 if no default
-                        if (default_idx != 0)
-                            try r.validateLiteralDefault(default_idx);
+                const first_child = r.ast.get(first_child_idx);
+                if (first_child.tag == .TYPE) {
+                    // has type annotation — resolve via symbol table
+                    const type_decl = r.resolveTypeAnnotation(first_child.token_index) orelse {
+                        try r.addError(.{ .undecl_var = first_child.token_index });
+                        member_count += 1;
+                        continue;
+                    };
+                    const default_idx = first_child.next_sibling; // 0 if no default
+                    if (default_idx != 0)
+                        try r.validateLiteralDefault(default_idx);
 
-                        _ = try r.di.params_or_members.append(.{
-                            .name_token_idx = member_node.token_index,
-                            .type_ = .{ .CONCRETE = type_decl },
-                            .default_ast_idx = default_idx,
-                        });
-                    } else {
-                        // no type annotation, has rhs — type inferred from default, not generic
-                        const rhs_idx = first_child_idx;
-                        try r.validateLiteralDefault(rhs_idx);
+                    _ = try r.di.params_or_members.append(.{
+                        .name_token_idx = member_node.token_index,
+                        .type_ = .{ .CONCRETE = type_decl },
+                        .default_ast_idx = default_idx,
+                    });
+                } else {
+                    // no type annotation, has rhs — type inferred from default, not generic
+                    const rhs_idx = first_child_idx;
+                    try r.validateLiteralDefault(rhs_idx);
+                    // TODO: add compile time expression evaluation later.
 
-                        _ = try r.di.params_or_members.append(.{
-                            .name_token_idx = member_node.token_index,
-                            .type_ = .{ .UNRESOLVED = {} },
-                            .default_ast_idx = rhs_idx,
-                        });
-                    }
-                    member_count += 1;
-                },
-                else => unreachable,
+                    _ = try r.di.params_or_members.append(.{
+                        .name_token_idx = member_node.token_index,
+                        .type_ = .{ .UNRESOLVED = {} },
+                        .default_ast_idx = rhs_idx,
+                    });
+                }
+                member_count += 1;
             }
         }
 
         _ = try r.di.struct_templates.append(.{
-            .ast_idx = node.first_child, // reuse: store something useful. Actually store parent node idx? Let's store the STRUCTDECL node_idx.
+            .ast_idx = node_idx, // node.first_child, // store the STRUCTDECL node_idx.
             .first_member_idx = first_member_idx,
             .member_count = member_count,
             .typevar_count = typevar_count,
