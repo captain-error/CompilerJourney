@@ -322,14 +322,16 @@ pub const Parser = struct {
         // }
 
         while (p.peek(0).tag != .RPAREN) {
-            p.skip(.{ .EOL, .BEGIN_BLOCK, .END_BLOCK });
+            // FIXME! only allow balanced BEGIN_BLOCK/END_BLOCK
+
+            p.skip(.{ .EOL });
             
             if (!try p.expectToken(.IDENTIFIER)) 
                 return error.UnexpectedToken;
             const param_idx = try p.parseStructMemberOrParam(.PARAM);
             try param_list.appendExisting(param_idx);
 
-            p.skip(.{ .EOL, .BEGIN_BLOCK, .END_BLOCK });
+            p.skip(.{ .EOL });
 
             if (p.peek(0).tag != .COMMA) break;
             p.next();

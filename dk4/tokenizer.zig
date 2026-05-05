@@ -40,7 +40,6 @@ pub const Token = struct {
         BW_AND,
         BW_XOR,
         BW_OR,
-        
 
         AND,
         OR,
@@ -93,6 +92,7 @@ pub const Tokenizer = struct {
 
     // stuff to keep track of indentation:
     at_line_start: bool = true,
+    paren_nesting_level: i16 = 0, // indentation is ignored inside parentheses
     indent_stack: [MAX_INDENTATION_LEVELS]u16 = [_]u16{0} ** MAX_INDENTATION_LEVELS,
     indent_depth: u8 = 0,
     pending_block_ends: u8 = 0,
@@ -132,66 +132,69 @@ pub const Tokenizer = struct {
             return t.emit(.END_BLOCK, 0);
         }
 
+        // Note: For empty/comment-only lines the leading spaces are left for the
+        //       whitespace chomper so normal token emission still works.
+
         // At the start of a new line, determine the indentation level.
-        if (t.at_line_start) {
-            t.at_line_start = false;
+        if (!t.at_line_start)
+            return null;
 
-            // Count leading spaces; tabs are not allowed.
-            var space_count: usize = 0;
-            for (t.source[t.pos..]) |char| {
-                if (char == '\t') return t.emit(.INVALID_INDENT, space_count + 1); // FIXME: better error messaging!
-                if (char != ' ') break;
-                space_count += 1;
+        t.at_line_start = false;
+
+        if (t.paren_nesting_level != 0)
+            return null; // inside parentheses: no indentation to check
+
+        // Count leading spaces; tabs are not allowed.
+        var space_count: usize = 0;
+        for (t.source[t.pos..]) |char| {
+            if (char == '\t') return t.emit(.INVALID_INDENT, space_count + 1); // FIXME: better error messaging!
+            if (char != ' ') break;
+            space_count += 1;
+        }
+
+        // Check whether this line contains real code (not empty / comment-only).
+        const peek_pos = t.pos + space_count;
+        const is_real_code = peek_pos < t.source.len and
+            t.source[peek_pos] != '\n' and
+            t.source[peek_pos] != '\r' and
+            t.source[peek_pos] != '#';
+
+        if (is_real_code) {
+            const new_indent: u16 = @intCast(space_count);
+            const cur_indent = t.indent_stack[t.indent_depth];
+
+            if (new_indent > cur_indent) {
+                // Indentation increased: push the new level and emit BEGIN_BLOCK.
+                std.debug.assert(t.indent_depth + 1 < MAX_INDENTATION_LEVELS); // FIXME!
+                if (t.indent_depth + 1 >= MAX_INDENTATION_LEVELS)
+                    return t.emit(.INVALID_INDENT, space_count); // we somehow need better error messaging here
+                t.indent_depth += 1;
+                t.indent_stack[t.indent_depth] = new_indent;
+
+                return t.emit(.BEGIN_BLOCK, space_count);
+            } else if (new_indent < cur_indent) {
+                // Indentation decreased: pop levels and emit END_BLOCKs.
+                while (t.indent_depth > 0 and t.indent_stack[t.indent_depth] > new_indent) {
+                    t.indent_depth -= 1;
+                    t.pending_block_ends += 1;
+                }
+                if (t.indent_stack[t.indent_depth] != new_indent) {
+                    // New indent doesn't match any previous level: error.
+                    return t.emit(.INVALID_INDENT, space_count);
+                }
+                std.debug.assert(t.pending_block_ends > 0);
+                t.pending_block_ends -= 1;
+
+                t.pos += space_count; // consume the indentation spaces for the next token
+                return t.emit(.END_BLOCK, 0);
             }
-
-            // Check whether this line contains real code (not empty / comment-only).
-            const peek_pos = t.pos + space_count;
-            const is_real_code = peek_pos < t.source.len and
-                t.source[peek_pos] != '\n' and
-                t.source[peek_pos] != '\r' and
-                t.source[peek_pos] != '#';
-
-            if (is_real_code) {
-                const new_indent: u16 = @intCast(space_count);
-                const cur_indent = t.indent_stack[t.indent_depth];
-
-                if (new_indent > cur_indent) {
-                    // Indentation increased: push the new level and emit BEGIN_BLOCK.
-                    std.debug.assert(t.indent_depth + 1 < MAX_INDENTATION_LEVELS); // FIXME!
-                    if (t.indent_depth + 1 >= MAX_INDENTATION_LEVELS)
-                        return t.emit(.INVALID_INDENT, space_count); // we somehow need better error messaging here
-                    t.indent_depth += 1;
-                    t.indent_stack[t.indent_depth] = new_indent;
-                    
-                    return t.emit(.BEGIN_BLOCK, space_count);
-                } else if (new_indent < cur_indent) {
-                    // Indentation decreased: pop levels and emit END_BLOCKs.
-                    while (t.indent_depth > 0 and t.indent_stack[t.indent_depth] > new_indent) {
-                        t.indent_depth -= 1;
-                        t.pending_block_ends += 1;
-                    }
-                    if(t.indent_stack[t.indent_depth] != new_indent) {
-                        // New indent doesn't match any previous level: error.
-                        return t.emit(.INVALID_INDENT, space_count);
-                    }
-                    std.debug.assert(t.pending_block_ends > 0);
-                    t.pending_block_ends -= 1;
-
-                    t.pos += space_count; // consume the indentation spaces for the next token
-                    return t.emit(.END_BLOCK, 0);
-                } 
-
-            }
-            // For empty/comment-only lines the leading spaces are left for the
-            // whitespace chomper so normal token emission still works.
         }
 
         return null;
     }
 
     pub fn next(t: *Tokenizer) Token {
-
-        if(t.checkIndentation()) |indent_token|
+        if (t.checkIndentation()) |indent_token|
             return indent_token;
 
         // chomp whitespace:
@@ -203,7 +206,7 @@ pub const Tokenizer = struct {
 
         // .EOF
         if (t.pos == t.source.len) {
-            if (t.indent_depth > 0) { 
+            if (t.indent_depth > 0) {
                 // close any remaining open indentation blocks first.
                 t.pending_block_ends = t.indent_depth;
                 t.indent_depth = 0;
@@ -229,8 +232,14 @@ pub const Tokenizer = struct {
             },
             ';' => return t.emit(.SEMICOLON, 1),
             ',' => return t.emit(.COMMA, 1),
-            '(' => return t.emit(.LPAREN, 1),
-            ')' => return t.emit(.RPAREN, 1),
+            '(' => {
+                t.paren_nesting_level += 1;
+                return t.emit(.LPAREN, 1);
+            },
+            ')' => {
+                t.paren_nesting_level -= 1;
+                return t.emit(.RPAREN, 1);
+            },
 
             // .GE, .GT
             '>' => {
@@ -290,10 +299,8 @@ pub const Tokenizer = struct {
 
             ':' => return t.emit(.COLON, 1),
             '.' => {
-                if (tail.len >= 2 and isNum(tail[1]))
-                    {} // fall through to number parsing below
-                else
-                    return t.emit(.DOT, 1);
+                if (tail.len >= 2 and isNum(tail[1])) {} // fall through to number parsing below
+                else return t.emit(.DOT, 1);
             },
             else => {},
         } // switch --------------------------------------
@@ -566,9 +573,14 @@ test "STRUCT keyword" {
     const expect = std.testing.expect;
     const expEql = std.testing.expectEqualStrings;
     var t: Token = undefined;
-    t = tokenizer.next(); try expect(t.tag == .STRUCT    ); try expEql(t.str(source), "struct");
-    t = tokenizer.next(); try expect(t.tag == .IDENTIFIER); try expEql(t.str(source), "Car");
-    t = tokenizer.next(); try expect(t.tag == .EOF       );
+    t = tokenizer.next();
+    try expect(t.tag == .STRUCT);
+    try expEql(t.str(source), "struct");
+    t = tokenizer.next();
+    try expect(t.tag == .IDENTIFIER);
+    try expEql(t.str(source), "Car");
+    t = tokenizer.next();
+    try expect(t.tag == .EOF);
 }
 
 test "type annotation" {
@@ -592,9 +604,14 @@ test "COLON ASSIGN without space" {
     var tokenizer = Tokenizer{ .source = source };
     const expect = std.testing.expect;
     var t: Token = undefined;
-    t = tokenizer.next(); try expect(t.tag == .IDENTIFIER);
-    t = tokenizer.next(); try expect(t.tag == .COLON     );
-    t = tokenizer.next(); try expect(t.tag == .ASSIGN    );
-    t = tokenizer.next(); try expect(t.tag == .INT_LIT   );
-    t = tokenizer.next(); try expect(t.tag == .EOF       );
+    t = tokenizer.next();
+    try expect(t.tag == .IDENTIFIER);
+    t = tokenizer.next();
+    try expect(t.tag == .COLON);
+    t = tokenizer.next();
+    try expect(t.tag == .ASSIGN);
+    t = tokenizer.next();
+    try expect(t.tag == .INT_LIT);
+    t = tokenizer.next();
+    try expect(t.tag == .EOF);
 }
