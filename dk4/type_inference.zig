@@ -18,6 +18,8 @@ const AstNodeIndex = par.AstNodeIndex;
 
 const FtAst = ft_ast.FtAst;
 const DkType = ft_ast.DkType;
+const TypeError = ft_ast.TypeError;
+const TypeErrorInfo = ft_ast.TypeErrorInfo;
 const BinaryOp = ft_ast.BinaryOp;
 const UnaryOp = ft_ast.UnaryOp;
 const AssignmentKind = ft_ast.AssignmentKind;
@@ -184,11 +186,42 @@ pub const StructInstance = struct {
     first_member_type_idx: Types.Index = .NONE,
 };
 
+pub fn infer(
+    gpa: std.mem.Allocator,
+    ts: TokenStream,
+    ast: *const AST,
+    di: *const DeclInfo,
+) !FtAst {
+    var ft = try FtAst.init(gpa);
+    errdefer ft.deinit();
+
+    var ti = TypeInferer{
+        .source = ts.source,
+        .tokens = ts.tokens,
+        .ts = ts,
+        .ast = ast,
+        .di = di,
+        .ft = &ft,
+        .fn_instances = try .init(gpa),
+        .struct_instances = try .initCapacity(gpa, 16),
+        .types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
+        .decl_map = .empty,
+        .current_scope = 0,
+        .fn_instantiation_stack = try .initCapacity(gpa, 64),
+        .fn_instantiation_ast_idx_stack = try .initCapacity(gpa, 64),
+        .gpa = gpa,
+    };
+    defer ti.deinit();
+
+    try ti.checkAndReconstructTypes();
+    return ft;
+}
+
 // -----------------------------------------------------------------------
 // TypeInferer
 // -----------------------------------------------------------------------
 
-pub const TypeInferer = struct {
+const TypeInferer = struct {
     // From parser
     source: []const u8,
     tokens: []const Token,
@@ -213,126 +246,24 @@ pub const TypeInferer = struct {
     // Error tracking
     fn_instantiation_stack: std.ArrayList(FunctionInstances.Index),
     fn_instantiation_ast_idx_stack: std.ArrayList(AstNodeIndex),
-    errors: std.ArrayList(ErrorInfo),
 
     gpa: std.mem.Allocator,
 
-    pub const Error = union(enum) {
-        // typing errors (kept from dk3)
-        return_type_missing_for_recursive_fn: AstNodeIndex,
-        fn_params_are_immutable: struct {
-            declaration: TokenIndex,
-            usage: TokenIndex,
-        },
-        wrong_num_fun_args: struct {
-            ast_node: AstNodeIndex,
-            expected: u8,
-            actual: u8,
-        },
-        wrong_type: struct {
-            ast_node: AstNodeIndex,
-            expected: [:0]const u8,
-            actual: DkType,
-        },
-        type_mismatch: struct {
-            ast_node: AstNodeIndex,
-            lhs: DkType,
-            rhs: DkType,
-        },
-        result_type_mismatch: struct {
-            ast_node: AstNodeIndex,
-            lhs: DkType,
-            rhs: DkType,
-        },
-        // struct errors (new for dk4)
-        wrong_num_struct_args: struct {
-            ast_node: AstNodeIndex,
-            expected: u8,
-            actual: u8,
-        },
-        unknown_struct_member: struct {
-            ast_node: AstNodeIndex,
-            member_name: TokenIndex,
-        },
-        duplicate_named_arg: struct {
-            ast_node: AstNodeIndex,
-            member_name: TokenIndex,
-        },
-        missing_struct_member: struct {
-            ast_node: AstNodeIndex,
-            member_name: TokenIndex,
-        },
-        member_access_on_non_struct: struct {
-            ast_node: AstNodeIndex,
-            actual: DkType,
-        },
-        unknown_field: struct {
-            ast_node: AstNodeIndex,
-            field_name: TokenIndex,
-        },
-    };
+    const Error = TypeError;
+    const ErrorInfo = TypeErrorInfo;
 
-    pub const ErrorInfo = struct {
-        error_: Error,
-        fn_instantiation_stack_top: [MAX_FN_INSTANTIATION_REPORT_DEPTH]InstantiationInfo,
-        fn_instantiation_stack_len: usize,
-
-        const InstantiationInfo = struct {
-            function: FunctionInstances.Index,
-            fn_call_ast_idx: AstNodeIndex,
-        };
-
-        const MAX_FN_INSTANTIATION_REPORT_DEPTH = 16;
-    };
-
-    pub const TypeInfererException = error{
+    const TypeInfererException = error{
         OutOfMemory,
         WrongNumberOfFunctionArguments,
     };
 
-    // -----------------------------------------------------------------------
-    // Init / Deinit
-    // -----------------------------------------------------------------------
-
-    pub fn init(
-        gpa: std.mem.Allocator,
-        ts: TokenStream,
-        ast: *const AST,
-        di: *const DeclInfo,
-        ft: *FtAst,
-    ) !TypeInferer {
-        const ti = TypeInferer{
-            .source = ts.source,
-            .tokens = ts.tokens,
-            .ts = ts,
-            .ast = ast,
-            .di = di,
-            .ft = ft,
-            .fn_instances = try .init(gpa),
-            .struct_instances = try .initCapacity(gpa, 16),
-            .types = try .initWithNullElement(gpa, 128, DkType.UNKNOWN),
-            .decl_map = .empty,
-            .current_scope = 0,
-            .fn_instantiation_stack = try .initCapacity(gpa, 64),
-            .fn_instantiation_ast_idx_stack = try .initCapacity(gpa, 64),
-            .errors = try .initCapacity(gpa, 8),
-            .gpa = gpa,
-        };
-        return ti;
-    }
-
-    pub fn deinit(ti: *TypeInferer) void {
+    fn deinit(ti: *TypeInferer) void {
         ti.fn_instances.deinit();
         ti.struct_instances.deinit(ti.gpa);
         ti.types.deinit();
         ti.decl_map.deinit(ti.gpa);
         ti.fn_instantiation_stack.deinit(ti.gpa);
         ti.fn_instantiation_ast_idx_stack.deinit(ti.gpa);
-        ti.errors.deinit(ti.gpa);
-    }
-
-    pub fn hasErrors(ti: *const TypeInferer) bool {
-        return ti.errors.items.len > 0;
     }
 
     // -----------------------------------------------------------------------
@@ -354,7 +285,7 @@ pub const TypeInferer = struct {
                 .fn_call_ast_idx = if (idx2 >= 0 and idx2 < ti.fn_instantiation_ast_idx_stack.items.len) ti.fn_instantiation_ast_idx_stack.items[@intCast(idx2)] else 0,
             };
         }
-        try ti.errors.append(ti.gpa, error_info);
+        try ti.ft.errors.append(ti.gpa, error_info);
     }
 
     fn expectType(ti: *TypeInferer, node_idx: AstNodeIndex, actual: DkType, comptime expected: DkType) !void {
@@ -367,7 +298,7 @@ pub const TypeInferer = struct {
     // Main entry point
     // -----------------------------------------------------------------------
 
-    pub fn checkAndReconstructTypes(ti: *TypeInferer) !void {
+    fn checkAndReconstructTypes(ti: *TypeInferer) !void {
         // Instantiate all non-generic functions
         for (ti.di.fn_templates.items[1..], 1..) |ft_item, i| {
             if (ft_item.typevar_count == 0) {
@@ -419,9 +350,9 @@ pub const TypeInferer = struct {
         for (params, argument_types, 0..) |param, arg_type, i| {
             const fn_call_node = ti.ast.get(fn_call_ast_idx);
             var arg_iter = fn_call_node.children(ti.ast);
-            var fn_argument_node_idx: AstNodeIndex = 0;
+            var fn_argument_node_idx: AstNodeIndex = fn_call_ast_idx;
             for (0..i + 1) |_|
-                fn_argument_node_idx = arg_iter.nextIdx() orelse unreachable;
+                fn_argument_node_idx = arg_iter.nextIdx() orelse fn_call_ast_idx;
 
             switch (param.type_) {
                 .TYPEVAR => {}, // generic — will be resolved by arg_type
@@ -591,31 +522,7 @@ pub const TypeInferer = struct {
         const arena = ti.ft.arena.allocator();
         const members = template.members(&ti.di.params_or_members);
 
-        // Build mangled name: "Name" for non-generic, "Name__type1__type2" for generic
-        const template_name = ti.tokens[ti.di.declarations.items[@intFromEnum(template.decl_idx)].name_token_idx].str(ti.source);
-        const struct_name = if (template.typevar_count == 0)
-            try arena.dupe(u8, template_name)
-        else blk: {
-            var name_buf: [256]u8 = undefined;
-            var pos: usize = 0;
-            @memcpy(name_buf[pos..][0..template_name.len], template_name);
-            pos += template_name.len;
-            for (member_types[0..template.member_count]) |mt| {
-                @memcpy(name_buf[pos..][0..2], "__");
-                pos += 2;
-                if (mt.isStruct()) {
-                    // Use the existing struct decl name
-                    const sd = ti.ft.struct_decls.items[mt.structInstanceIdx()];
-                    @memcpy(name_buf[pos..][0..sd.name.len], sd.name);
-                    pos += sd.name.len;
-                } else {
-                    const tn = mt.langName();
-                    @memcpy(name_buf[pos..][0..tn.len], tn);
-                    pos += tn.len;
-                }
-            }
-            break :blk try arena.dupe(u8, name_buf[0..pos]);
-        };
+        const struct_name = try arena.dupe(u8, ti.tokens[ti.di.declarations.items[@intFromEnum(template.decl_idx)].name_token_idx].str(ti.source));
 
         // Create member VarDecls
         const members_start: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
@@ -632,6 +539,7 @@ pub const TypeInferer = struct {
         try ti.ft.struct_decls.append(ti.gpa, .{
             .name = struct_name,
             .members = .{ .start = members_start, .end = members_end },
+            .generic = template.typevar_count > 0,
         });
 
         return DkType.fromStructInstance(@intCast(idx));
@@ -1136,9 +1044,80 @@ pub const TypeInferer = struct {
         }
     }
 
-    fn inferFnCall(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: DeclIndex) !ExpressionIndex {
-        const node = ti.ast.get(ast_idx);
+    const ResolvedArgs = struct {
+        types: [MAX_NUM_FUNCTION_PARAMS]DkType,
+        exprs: [MAX_NUM_FUNCTION_PARAMS]ExpressionIndex,
+        count: u8,
+    };
 
+    fn resolveArgs(ti: *TypeInferer, ast_idx: AstNodeIndex, params: []const nr.ParamOrMember, param_count: u8) !ResolvedArgs {
+        var result = ResolvedArgs{
+            .types = .{.UNKNOWN} ** MAX_NUM_FUNCTION_PARAMS,
+            .exprs = .{0} ** MAX_NUM_FUNCTION_PARAMS,
+            .count = param_count,
+        };
+        var param_set: [MAX_NUM_FUNCTION_PARAMS]bool = .{false} ** MAX_NUM_FUNCTION_PARAMS;
+        var positional_count: u8 = 0;
+
+        const node = ti.ast.get(ast_idx);
+        var child_iter = node.children(ti.ast);
+        while (child_iter.nextIdx()) |arg_ast_idx| {
+            const arg_node = ti.ast.get(arg_ast_idx);
+
+            if (arg_node.tag == .NAMED_ARG) {
+                const arg_name = ti.tokens[arg_node.token_index].str(ti.source);
+                var found_idx: ?u8 = null;
+                for (params, 0..) |p, i| {
+                    if (std.mem.eql(u8, ti.tokens[p.name_token_idx].str(ti.source), arg_name)) {
+                        found_idx = @intCast(i);
+                        break;
+                    }
+                }
+
+                if (found_idx == null) {
+                    try ti.addError(.{ .unknown_named_arg = .{ .ast_node = arg_ast_idx, .member_name = arg_node.token_index } });
+                    continue;
+                }
+
+                const mi = found_idx.?;
+                if (param_set[mi]) {
+                    try ti.addError(.{ .duplicate_named_arg = .{ .ast_node = arg_ast_idx, .member_name = arg_node.token_index } });
+                    continue;
+                }
+
+                const value_expr = try ti.inferExpr(arg_node.first_child);
+                result.types[mi] = ti.ft.expressions.items[value_expr].type_;
+                result.exprs[mi] = value_expr;
+                param_set[mi] = true;
+            } else {
+                if (positional_count >= param_count) {
+                    try ti.addError(.{ .too_many_positional_args = .{ .ast_node = ast_idx, .expected = param_count, .actual = positional_count + 1 } });
+                    break;
+                }
+                const value_expr = try ti.inferExpr(arg_ast_idx);
+                result.types[positional_count] = ti.ft.expressions.items[value_expr].type_;
+                result.exprs[positional_count] = value_expr;
+                param_set[positional_count] = true;
+                positional_count += 1;
+            }
+        }
+
+        for (params, 0..) |p, i| {
+            if (param_set[i]) continue;
+            if (p.default_ast_idx != 0) {
+                const default_expr = try ti.inferExpr(p.default_ast_idx);
+                result.types[i] = ti.ft.expressions.items[default_expr].type_;
+                result.exprs[i] = default_expr;
+                param_set[i] = true;
+            } else {
+                try ti.addError(.{ .missing_required_arg = .{ .ast_node = ast_idx, .member_name = p.name_token_idx } });
+            }
+        }
+
+        return result;
+    }
+
+    fn inferFnCall(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: DeclIndex) !ExpressionIndex {
         // Find function template by decl_idx
         const ft_idx = blk: {
             for (ti.di.fn_templates.items[1..], 1..) |ft_item, i| {
@@ -1148,27 +1127,24 @@ pub const TypeInferer = struct {
             unreachable;
         };
 
-        // Infer argument types
-        var arg_types_buf: [MAX_NUM_FUNCTION_PARAMS]DkType = undefined;
-        var arg_count: usize = 0;
+        const fn_template = &ti.di.fn_templates.items[@intFromEnum(ft_idx)];
+        const params = fn_template.params(&ti.di.params_or_members);
+
+        const resolved = try ti.resolveArgs(ast_idx, params, fn_template.param_count);
+        const arg_types = resolved.types[0..fn_template.param_count];
+
+        // Build linked list of arg expressions in param order (includes evaluated defaults for omitted args)
         var first_arg_expr: ExpressionIndex = 0;
         var prev_arg_expr: ExpressionIndex = 0;
-
-        var child_iter = node.children(ti.ast);
-        while (child_iter.nextIdx()) |arg_ast_idx| {
-            const arg_expr = try ti.inferExpr(arg_ast_idx);
-            arg_types_buf[arg_count] = ti.ft.expressions.items[arg_expr].type_;
-            arg_count += 1;
-
+        for (0..fn_template.param_count) |i| {
+            const ae = resolved.exprs[i];
+            if (ae == 0) continue;
             if (first_arg_expr == 0)
-                first_arg_expr = arg_expr
+                first_arg_expr = ae
             else
-                ti.ft.expressions.items[prev_arg_expr].next_sibling = arg_expr;
-
-            prev_arg_expr = arg_expr;
+                ti.ft.expressions.items[prev_arg_expr].next_sibling = ae;
+            prev_arg_expr = ae;
         }
-
-        const arg_types = arg_types_buf[0..arg_count];
 
         // Instantiate function (does type checking and creates FnDecl if needed)
         const return_type = ti.instantiateFunction(ast_idx, ft_idx, arg_types) catch |err| switch (err) {
@@ -1193,8 +1169,6 @@ pub const TypeInferer = struct {
     }
 
     fn inferStructInst(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: DeclIndex) !ExpressionIndex {
-        const node = ti.ast.get(ast_idx);
-
         // Find struct template by decl_idx
         const st_idx = blk: {
             for (ti.di.struct_templates.items[1..], 1..) |st_item, i| {
@@ -1207,81 +1181,17 @@ pub const TypeInferer = struct {
         const template = &ti.di.struct_templates.items[@intFromEnum(st_idx)];
         const members = template.members(&ti.di.params_or_members);
 
-        // Process arguments: handle mix of positional and named args
-        var member_types: [MAX_NUM_FUNCTION_PARAMS]DkType = .{.UNKNOWN} ** MAX_NUM_FUNCTION_PARAMS;
-        var member_exprs: [MAX_NUM_FUNCTION_PARAMS]ExpressionIndex = .{0} ** MAX_NUM_FUNCTION_PARAMS;
-        var member_set: [MAX_NUM_FUNCTION_PARAMS]bool = .{false} ** MAX_NUM_FUNCTION_PARAMS;
-        var positional_count: u8 = 0;
-
-        var child_iter = node.children(ti.ast);
-        while (child_iter.nextIdx()) |arg_ast_idx| {
-            const arg_node = ti.ast.get(arg_ast_idx);
-
-            if (arg_node.tag == .NAMED_ARG) {
-                // Named argument: token_index = member name, first_child = value
-                const member_name = ti.tokens[arg_node.token_index].str(ti.source);
-                var found_idx: ?u8 = null;
-                for (members, 0..) |m, i| {
-                    if (std.mem.eql(u8, ti.tokens[m.name_token_idx].str(ti.source), member_name)) {
-                        found_idx = @intCast(i);
-                        break;
-                    }
-                }
-
-                if (found_idx == null) {
-                    try ti.addError(.{ .unknown_struct_member = .{ .ast_node = arg_ast_idx, .member_name = arg_node.token_index } });
-                    continue;
-                }
-
-                const mi = found_idx.?;
-                if (member_set[mi]) {
-                    try ti.addError(.{ .duplicate_named_arg = .{ .ast_node = arg_ast_idx, .member_name = arg_node.token_index } });
-                    continue;
-                }
-
-                const value_expr = try ti.inferExpr(arg_node.first_child);
-                member_types[mi] = ti.ft.expressions.items[value_expr].type_;
-                member_exprs[mi] = value_expr;
-                member_set[mi] = true;
-            } else {
-                // Positional argument
-                if (positional_count >= template.member_count) {
-                    try ti.addError(.{ .wrong_num_struct_args = .{ .ast_node = ast_idx, .expected = template.member_count, .actual = positional_count + 1 } });
-                    break;
-                }
-                const value_expr = try ti.inferExpr(arg_ast_idx);
-                member_types[positional_count] = ti.ft.expressions.items[value_expr].type_;
-                member_exprs[positional_count] = value_expr;
-                member_set[positional_count] = true;
-                positional_count += 1;
-            }
-        }
-
-        // Fill in defaults for missing members
-        for (members, 0..) |m, i| {
-            if (member_set[i]) continue;
-
-            if (m.default_ast_idx != 0) {
-                // Evaluate default expression
-                const default_expr = try ti.inferExpr(m.default_ast_idx);
-                member_types[i] = ti.ft.expressions.items[default_expr].type_;
-                member_exprs[i] = default_expr;
-                member_set[i] = true;
-            } else {
-                // Required member not provided
-                try ti.addError(.{ .missing_struct_member = .{ .ast_node = ast_idx, .member_name = m.name_token_idx } });
-            }
-        }
+        const resolved = try ti.resolveArgs(ast_idx, members, template.member_count);
 
         // Instantiate struct type
-        const struct_type = try ti.instantiateStruct(st_idx, member_types[0..template.member_count]);
+        const struct_type = try ti.instantiateStruct(st_idx, resolved.types[0..template.member_count]);
 
         // Build linked list of member value expressions in member order
         var first_member_expr: ExpressionIndex = 0;
         var prev_member_expr: ExpressionIndex = 0;
         for (0..template.member_count) |i| {
-            const me = member_exprs[i];
-            if (me == 0) continue; // missing member (error already reported)
+            const me = resolved.exprs[i];
+            if (me == 0) continue;
             if (first_member_expr == 0)
                 first_member_expr = me
             else
@@ -1397,26 +1307,16 @@ test "merged: zinseszins program" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try nr.resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try FtAst.init(gpa);
+    var ft = try infer(gpa, ts, &pr.ast, &di);
     defer ft.deinit();
-
-    var ti = try TypeInferer.init(gpa, ts, &parser.ast, &di, &ft);
-    defer ti.deinit();
-
-    ti.checkAndReconstructTypes() catch |err| {
-        std.debug.print("Type inference error: {}\n", .{err});
-        return error.TypeInferenceError;
-    };
-    try std.testing.expect(!ti.hasErrors());
 
     // Should have 4 fn_decls: [0]=invalid, [1]=do_zins(FLOAT,FLOAT), [2]=zinseszins(FLOAT,FLOAT,INT), [3]=main()
     // do_zins is also called with INT args from the lowered code? No — zinseszins passes result (FLOAT) and zins (FLOAT).
@@ -1446,26 +1346,21 @@ test "merged: type error in binary op" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try nr.resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try FtAst.init(gpa);
+    var ft = try infer(gpa, ts, &pr.ast, &di);
     defer ft.deinit();
 
-    var ti = try TypeInferer.init(gpa, ts, &parser.ast, &di, &ft);
-    defer ti.deinit();
-
-    ti.checkAndReconstructTypes() catch {};
-    try std.testing.expect(ti.hasErrors());
+    try std.testing.expect(ft.hasErrors());
     // x + y where x:INT, y:BOOL → "RHS must be of number type"
-    try std.testing.expectEqual(@as(usize, 1), ti.errors.items.len);
-    try std.testing.expect(ti.errors.items[0].error_ == .wrong_type);
+    try std.testing.expectEqual(@as(usize, 1), ft.errors.items.len);
+    try std.testing.expect(ft.errors.items[0].error_ == .wrong_type);
 }
 
 test "merged: generic function instantiation" {
@@ -1484,33 +1379,179 @@ test "merged: generic function instantiation" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try nr.resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try FtAst.init(gpa);
+    var ft = try infer(gpa, ts, &pr.ast, &di);
     defer ft.deinit();
 
-    var ti = try TypeInferer.init(gpa, ts, &parser.ast, &di, &ft);
-    defer ti.deinit();
-
-    ti.checkAndReconstructTypes() catch |err| {
-        std.debug.print("Type inference error: {}\n", .{err});
-        return error.TypeInferenceError;
-    };
-
     // add(INT,INT) returns INT, add(FLOAT,FLOAT) returns FLOAT, x + y is type mismatch (INT + FLOAT)
-    try std.testing.expect(ti.hasErrors());
-    try std.testing.expectEqual(@as(usize, 1), ti.errors.items.len);
-    try std.testing.expect(ti.errors.items[0].error_ == .type_mismatch);
-    try std.testing.expectEqual(DkType.INT, ti.errors.items[0].error_.type_mismatch.lhs);
-    try std.testing.expectEqual(DkType.FLOAT, ti.errors.items[0].error_.type_mismatch.rhs);
+    try std.testing.expect(ft.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), ft.errors.items.len);
+    try std.testing.expect(ft.errors.items[0].error_ == .type_mismatch);
+    try std.testing.expectEqual(DkType.INT, ft.errors.items[0].error_.type_mismatch.lhs);
+    try std.testing.expectEqual(DkType.FLOAT, ft.errors.items[0].error_.type_mismatch.rhs);
 
     // Should have 4 fn_decls: invalid + add(INT,INT) + add(FLOAT,FLOAT) + main
     try std.testing.expectEqual(@as(usize, 4), ft.fn_decls.items.len);
+}
+
+test "function with default args" {
+    const source =
+        \\fn greet(a, b := 10)
+        \\    result = a + b
+        \\
+        \\fn main()
+        \\    x := greet(1)
+        \\    y := greet(2, 3)
+        \\    result = x + y
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+    try std.testing.expect(!di.hasErrors());
+
+    var ft = try infer(gpa, ts, &pr.ast, &di);
+    defer ft.deinit();
+
+    try std.testing.expect(!ft.hasErrors());
+    // greet(INT,INT) monomorphized once, main
+    try std.testing.expectEqual(@as(usize, 3), ft.fn_decls.items.len);
+}
+
+test "function with named args" {
+    const source =
+        \\fn calc(a, b)
+        \\    result = a - b
+        \\
+        \\fn main()
+        \\    result = calc(b=1, a=5)
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+    try std.testing.expect(!di.hasErrors());
+
+    var ft = try infer(gpa, ts, &pr.ast, &di);
+    defer ft.deinit();
+
+    try std.testing.expect(!ft.hasErrors());
+}
+
+test "function missing required arg" {
+    const source =
+        \\fn calc(a, b)
+        \\    result = a + b
+        \\
+        \\fn main()
+        \\    result = calc(1)
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+    try std.testing.expect(!di.hasErrors());
+
+    var ft = try infer(gpa, ts, &pr.ast, &di);
+    defer ft.deinit();
+
+    try std.testing.expect(ft.hasErrors());
+    try std.testing.expect(ft.errors.items[0].error_ == .missing_required_arg);
+}
+
+test "non-default param after default" {
+    const source =
+        \\fn bad(a := 1, b)
+        \\    result = a + b
+        \\
+        \\fn main()
+        \\    result = bad(1, 2)
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+
+    try std.testing.expect(di.hasErrors());
+    var found = false;
+    for (di.errors.items) |e| {
+        if (e == .non_default_param_after_default)
+            found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "supply wrong type to fn param with default" {
+    const source =
+        \\fn bad(a, b:=1)
+        \\    result = a + b
+        \\
+        \\fn main()
+        \\    result = bad(1, true)
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+    try std.testing.expect(!di.hasErrors());
+
+    var ft = try infer(gpa, ts, &pr.ast, &di);
+    defer ft.deinit();
+
+    try std.testing.expect(ft.hasErrors());
+    var err : ?TypeErrorInfo = null;
+    for (ft.errors.items) |e| {
+        if (e.error_ == .wrong_type)
+            err = e;
+    }
+
+    try std.testing.expect(err != null);
+    try std.testing.expect(err.?.error_.wrong_type.actual == DkType.BOOL); // error is on the call site
 }

@@ -77,6 +77,36 @@ pub const AstNodeTag = enum(u8) {
 
 pub const PrecedenceLevel = u8;
 
+pub const ParseResult = struct {
+    ast: AST,
+    root_node: AstNodeIndex,
+    errors: std.ArrayList(Parser.Error),
+    gpa: std.mem.Allocator,
+
+    pub fn hasErrors(self: *const ParseResult) bool {
+        return self.errors.items.len > 0;
+    }
+
+    pub fn deinit(self: *ParseResult) void {
+        self.ast.deinit();
+        self.errors.deinit(self.gpa);
+    }
+};
+
+pub fn parse(source: []const u8, tokens: []const Token, gpa: std.mem.Allocator) !ParseResult {
+    var p = try Parser.init(source, tokens, gpa);
+    errdefer p.deinit();
+
+    _ = try p.parse();
+
+    return .{
+        .ast = p.ast,
+        .root_node = p.root_node,
+        .errors = p.errors,
+        .gpa = gpa,
+    };
+}
+
 const ParserError = error{
     OutOfMemory,
     IfConditionIsTooLong,

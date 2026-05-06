@@ -151,6 +151,7 @@ pub const DeclInfo = struct {
 
 pub const Error = union(enum) {
     undecl_var: TokenIndex,
+    undecl_type: TokenIndex,
     multi_decl_var: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     multi_decl_fn: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     decl_shadows_outer: struct { outer_decl: TokenIndex, error_decl: TokenIndex },
@@ -163,6 +164,7 @@ pub const Error = union(enum) {
     duplicate_struct_member: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     struct_name_shadows: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     default_must_be_literal: TokenIndex,
+    non_default_param_after_default: struct { param: TokenIndex, first_default: TokenIndex },
     valueless_decl_outside_struct: TokenIndex,
 };
 
@@ -446,7 +448,7 @@ const Resolver = struct {
                 if (first_child.tag == .TYPE) {
                     // has type annotation — resolve via symbol table
                     const type_decl = r.resolveTypeAnnotation(first_child.token_index) orelse {
-                        try r.addError(.{ .undecl_var = first_child.token_index });
+                        try r.addError(.{ .undecl_type = first_child.token_index });
                         member_count += 1;
                         continue;
                     };
@@ -513,7 +515,7 @@ const Resolver = struct {
 
         // Re-iterate to actually register params
         var child_list2 = fn_params_node.children(r.ast);
-        var pi: u8 = 0;
+        var typevar_count: u8 = 0;
         while (child_list2.nextIdx()) |param_idx| {
             const param_node = r.ast.get(param_idx);
             // Check param shadows global
@@ -522,46 +524,47 @@ const Resolver = struct {
                 try r.addError(.{ .param_shadows_global = .{ .global_decl = existing.declaration_token, .param_decl = param_node.token_index } });
             }
 
-            // In dk4, params can have type annotations via DECLARATION with TYPE child
-            // For now in the template, all params without annotations are typevars
-            if (param_node.tag == .ATOM) {
-                // bare param (no type annotation) — typevar
+            assert(param_node.tag == .PARAM);
+
+            const first_child_idx = param_node.first_child;
+            if (first_child_idx == 0) {
+                // bare param (no type, no default) — typevar
                 _ = try r.di.params_or_members.append(.{
                     .name_token_idx = param_node.token_index,
-                    .type_ = .{ .TYPEVAR = pi },
+                    .type_ = .{ .TYPEVAR = typevar_count },
                 });
-            } else if (param_node.tag == .DECLARATION) {
-                // param with type annotation
-                const first_child_idx = param_node.first_child;
+                typevar_count += 1;
+            } else {
                 const first_child = r.ast.get(first_child_idx);
                 if (first_child.tag == .TYPE) {
+                    // has type annotation
                     if (r.resolveTypeAnnotation(first_child.token_index)) |type_decl| {
+                        const default_idx = first_child.next_sibling;
+                        if (default_idx != 0)
+                            try r.validateLiteralDefault(default_idx);
                         _ = try r.di.params_or_members.append(.{
                             .name_token_idx = param_node.token_index,
                             .type_ = .{ .CONCRETE = type_decl },
+                            .default_ast_idx = default_idx,
                         });
                     } else {
-                        // unknown type — error, but still register param as typevar
-                        try r.addError(.{ .undecl_var = first_child.token_index });
+                        try r.addError(.{ .undecl_type = first_child.token_index });
                         _ = try r.di.params_or_members.append(.{
                             .name_token_idx = param_node.token_index,
-                            .type_ = .{ .TYPEVAR = pi },
+                            .type_ = .{ .TYPEVAR = typevar_count },
                         });
+                        typevar_count += 1;
                     }
                 } else {
+                    // no type annotation, has default — UNRESOLVED
+                    try r.validateLiteralDefault(first_child_idx);
                     _ = try r.di.params_or_members.append(.{
                         .name_token_idx = param_node.token_index,
-                        .type_ = .{ .TYPEVAR = pi },
+                        .type_ = .{ .UNRESOLVED = {} },
+                        .default_ast_idx = first_child_idx,
                     });
                 }
-            } else {
-                // bare ATOM identifier — this is the normal dk3 case
-                _ = try r.di.params_or_members.append(.{
-                    .name_token_idx = param_node.token_index,
-                    .type_ = .{ .TYPEVAR = pi },
-                });
             }
-            pi += 1;
         }
 
         // Check duplicate param names
@@ -574,10 +577,21 @@ const Resolver = struct {
             }
         }
 
+        // Check defaults must be trailing
+        const params_slice = r.di.params_or_members.items[@intFromEnum(first_param_idx)..][0..param_count];
+        var first_default_token: ?TokenIndex = null;
+        for (params_slice) |p| {
+            if (p.default_ast_idx != 0) {
+                if (first_default_token == null)
+                    first_default_token = p.name_token_idx;
+            } else if (first_default_token) |fd| {
+                try r.addError(.{ .non_default_param_after_default = .{ .param = p.name_token_idx, .first_default = fd } });
+            }
+        }
+
         const body_ast_idx = fn_params_node.next_sibling;
         assert(body_ast_idx > 0);
 
-        const typevar_count = param_count; // for now, all params are typevars (same as dk3)
         _ = try r.di.fn_templates.append(.{
             .ast_idx = node_idx,
             .body_ast_idx = body_ast_idx,
@@ -909,12 +923,11 @@ test "resolve simple program" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(!di.hasErrors());
@@ -932,12 +945,11 @@ test "resolve undeclared variable" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(di.hasErrors());
@@ -956,12 +968,11 @@ test "resolve duplicate variable" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(di.hasErrors());
@@ -982,12 +993,11 @@ test "resolve function call" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(!di.hasErrors());
@@ -1008,12 +1018,11 @@ test "resolve struct declaration" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(!di.hasErrors());
@@ -1037,12 +1046,11 @@ test "resolve struct with generic member" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(!di.hasErrors());
@@ -1065,12 +1073,11 @@ test "resolve struct instantiation" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(!di.hasErrors());
@@ -1080,7 +1087,7 @@ test "resolve struct instantiation" {
         if (decl_idx != .NONE) {
             const decl = di.declarations.items[@intFromEnum(decl_idx)];
             if (decl.kind == .STRUCT) {
-                const call_node = parser.ast.get(@intCast(ast_idx));
+                const call_node = pr.ast.get(@intCast(ast_idx));
                 if (call_node.tag == .CALL_OR_INST)
                     found_car_call = true;
             }
@@ -1103,12 +1110,11 @@ test "resolve duplicate struct member" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(di.hasErrors());
@@ -1130,12 +1136,11 @@ test "resolve shadowing error" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(di.hasErrors());
@@ -1152,12 +1157,11 @@ test "resolve unknown function" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     try std.testing.expect(di.hasErrors());
@@ -1178,12 +1182,11 @@ test "resolve member access" {
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try par.Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
     // Member access field resolution is deferred to type inference,

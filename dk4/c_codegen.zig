@@ -65,7 +65,7 @@ const CCodegen = struct {
                 try self.emitStr(";\n");
             }
             try self.emitStr("} ");
-            try self.emitStr(sd.name);
+            try self.emitMangledStructName(sd);
             try self.emitStr(";\n\n");
         }
     }
@@ -150,7 +150,7 @@ const CCodegen = struct {
 
         try self.emitTypeName(fn_decl.return_type);
         try self.emitByte(' ');
-        try self.emitMangledName(fn_decl);
+        try self.emitMangledFnName(fn_decl);
         try self.emitByte('(');
 
         const params = self.ft.var_decls.items[fn_decl.params.start..fn_decl.params.end];
@@ -164,17 +164,30 @@ const CCodegen = struct {
         try self.emitByte(')');
     }
 
-    fn emitMangledName(self: *CCodegen, fn_decl: FnDecl) EmitError!void {
+    fn emitMangledFnName(self: *CCodegen, fn_decl: FnDecl) EmitError!void {
         try self.emitStr(fn_decl.name);
         const params = self.ft.var_decls.items[fn_decl.params.start..fn_decl.params.end];
         for (params) |param| {
             try self.emitStr("__");
-            if (param.type_.isStruct()) {
-                const sd = self.ft.struct_decls.items[param.type_.structInstanceIdx()];
-                try self.emitStr(sd.name);
-            } else {
-                try self.emitStr(param.type_.langName());
-            }
+            try self.emitMangledTypeName(param.type_);
+        }
+    }
+
+    fn emitMangledStructName(self: *CCodegen, sd: ft_ast.StructDecl) EmitError!void {
+        try self.emitStr(sd.name);
+        if (!sd.generic) return;
+        const members = self.ft.var_decls.items[sd.members.start..sd.members.end];
+        for (members) |m| {
+            try self.emitStr("__");
+            try self.emitMangledTypeName(m.type_);
+        }
+    }
+
+    fn emitMangledTypeName(self: *CCodegen, t: DkType) EmitError!void {
+        if (t.isStruct()) {
+            try self.emitMangledStructName(self.ft.struct_decls.items[t.structInstanceIdx()]);
+        } else {
+            try self.emitStr(t.langName());
         }
     }
 
@@ -327,7 +340,7 @@ const CCodegen = struct {
             },
             .FN_CALL => |call| {
                 const fn_decl = self.ft.fn_decls.items[call.function];
-                try self.emitMangledName(fn_decl);
+                try self.emitMangledFnName(fn_decl);
                 try self.emitByte('(');
                 var arg_idx = call.args_start;
                 var first = true;
@@ -343,7 +356,7 @@ const CCodegen = struct {
             .STRUCT_INST => |si| {
                 const sd = self.ft.struct_decls.items[si.struct_instance];
                 try self.emitByte('(');
-                try self.emitStr(sd.name);
+                try self.emitMangledStructName(sd);
                 try self.emitStr("){ ");
                 var arg_idx = si.args_start;
                 var first = true;
@@ -416,8 +429,7 @@ const CCodegen = struct {
 
     fn emitTypeName(self: *CCodegen, t: DkType) EmitError!void {
         if (t.isStruct()) {
-            const sd = self.ft.struct_decls.items[t.structInstanceIdx()];
-            try self.emitStr(sd.name);
+            try self.emitMangledStructName(self.ft.struct_decls.items[t.structInstanceIdx()]);
             return;
         }
         try self.emitStr(switch (t) {
@@ -511,8 +523,6 @@ const nr = @import("name_resolution.zig");
 const type_inference = @import("type_inference.zig");
 
 const TokenStream = tok.TokenStream;
-const Parser = par.Parser;
-const TypeInferer = type_inference.TypeInferer;
 
 fn runCompilerAndCompareOutput(source: []const u8, expected_c: []const u8) !void {
     const gpa = std.testing.allocator;
@@ -520,26 +530,17 @@ fn runCompilerAndCompareOutput(source: []const u8, expected_c: []const u8) !void
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
 
-    var parser = try Parser.init(source, ts.tokens, gpa);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expect(!parser.hasErrors());
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
 
-    var di = try nr.resolve(gpa, &parser.ast, ts.tokens, source, parser.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try FtAst.init(gpa);
+    var ft = try type_inference.infer(gpa, ts, &pr.ast, &di);
     defer ft.deinit();
-
-    var ti = try TypeInferer.init(gpa, ts, &parser.ast, &di, &ft);
-    defer ti.deinit();
-
-    ti.checkAndReconstructTypes() catch |err| {
-        std.debug.print("Type inference error: {}\n", .{err});
-        return error.TypeInferenceError;
-    };
-    try std.testing.expect(!ti.hasErrors());
+    try std.testing.expect(!ft.hasErrors());
 
     var aw: Writer.Allocating = .init(gpa);
     defer aw.deinit();

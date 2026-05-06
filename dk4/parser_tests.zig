@@ -194,31 +194,6 @@ test "parse function declaration with complex params" {
     try testParser(source, Parser.parseFnDecl, expected, false);
 }
 
-// test "parse function declaration with concrete parameter types" {
-//     const source =
-//         \\fn add(a: Float, b: Float)
-//         \\  return a + b
-//     ;
-//     const expected = .{
-//         AstNodeTag.FNDECL, "add",
-//         .{
-//             AstNodeTag.FNPARAMS,
-//             .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
-//             .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
-//         },
-//         .{
-//             AstNodeTag.BLOCK, .{
-//                 AstNodeTag.RETURN, Token.Tag.RETURN, "return", .{
-//                     AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
-//                     .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" }, //
-//                     .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
-//                 },
-//             },
-//         },
-//     };
-//     try testParser(source, Parser.parseFnDecl, expected, false);
-// }
-
 test "parse mini program" {
         const source =
         \\fn main()
