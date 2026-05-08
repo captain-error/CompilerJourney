@@ -71,8 +71,14 @@ pub const AstNodeTag = enum(u8) {
     IF, // 3 children: condition, then, else
     STRUCTDECL, // token_index = struct name IDENT. children: MEMBER nodes
     MEMBER, // token_index = member name IDENT. 0..=2 children. (in struct decl: optional TYPE, optional default value.)
-    TYPE, // token_index = type name IDENT. 0 children (for now).
+    TYPE, // token_index = type name IDENT. 0 children for scalar, 1 child (ARRAY_SHAPE) for array type.
     MEMBER_ACCESS, // token_index = field name IDENT. 1 child: object expression.
+    ARRAY_LIT, // array literal [1,2,3]. arbitrary children: ATOM, ARRAY_LIT, FILL
+    FILL, // fill element X... — 1 child: fill value expression
+    ARRAY_SHAPE, // dimension list in array type — 1+ children: ATOM (size) or INFER_DIM
+    INFER_DIM, // _ placeholder in array shape — 0 children
+    ARRAY_ACCESS, // a[i,j] — 2 children: target expression + INDEX_ARGS
+    INDEX_ARGS, // index argument list — 1+ children
 };
 
 pub const PrecedenceLevel = u8;
@@ -430,7 +436,11 @@ pub const Parser = struct {
         }
 
         // Postfix member access chain
-        return p.parseMemberAccessChain(result);
+        result = try p.parseMemberAccessChain(result);
+        // Postfix array access
+        if (p.peek(0).tag == .LBRACKET)
+            result = try p.parseArrayAccess(result);
+        return result;
     }
 
     fn parseMemberAccessChain(p: *Parser, base: AstNodeIndex) InternalParserError!AstNodeIndex {
@@ -540,13 +550,9 @@ pub const Parser = struct {
                     const rhs = try p.parseExpression();
                     p.ast.get(node_idx).first_child = rhs;
                 },
-                .IDENTIFIER => {
+                .IDENTIFIER, .LBRACKET => {
                     // x : Type ...
-                    const type_idx = try p.ast.append(.{
-                        .tag = .TYPE,
-                        .token_index = p.token_idx,
-                    });
-                    p.next();
+                    const type_idx = try p.parseType();
                     p.ast.get(node_idx).first_child = type_idx;
 
                     if (p.peek(0).tag == .ASSIGN) {
@@ -564,6 +570,63 @@ pub const Parser = struct {
         }
 
         return node_idx;
+    }
+
+    fn parseScalarType(p: *Parser) InternalParserError!AstNodeIndex {
+        if (!try p.expectToken(.IDENTIFIER))
+            return error.UnexpectedToken;
+        const type_idx = try p.ast.append(.{ .tag = .TYPE, .token_index = p.token_idx });
+        p.next();
+        return type_idx;
+    }
+
+    fn parseArrayType(p: *Parser) InternalParserError!AstNodeIndex {
+        assert(p.peek(0).tag == .LBRACKET);
+        const bracket_token = p.token_idx;
+        p.next(); // consume [
+
+        const shape_idx = try p.ast.append(.{ .tag = .ARRAY_SHAPE, .token_index = bracket_token });
+        var dim_list = p.ast.startList();
+
+        while (p.peek(0).tag != .RBRACKET) {
+            if (p.peek(0).tag == .EOF) {
+                try p.emitError(p.token_idx, "']'");
+                return error.UnexpectedToken;
+            }
+            const dim_idx = blk: {
+                if (p.peek(0).tag == .IDENTIFIER and
+                    std.mem.eql(u8, p.source[p.tokens[p.token_idx].start..p.tokens[p.token_idx].end()], "_"))
+                {
+                    const idx = try p.ast.append(.{ .tag = .INFER_DIM, .token_index = p.token_idx });
+                    p.next();
+                    break :blk idx;
+                } else {
+                    if (!try p.expectToken(.INT_LIT))
+                        return error.UnexpectedToken;
+                    const idx = try p.ast.append(.{ .tag = .ATOM, .token_index = p.token_idx });
+                    p.next();
+                    break :blk idx;
+                }
+            };
+            try dim_list.appendExisting(dim_idx);
+            if (p.peek(0).tag == .COMMA) p.next();
+        }
+
+        if (!try p.expectToken(.RBRACKET))
+            return error.UnexpectedToken;
+        p.next(); // consume ]
+
+        p.ast.get(shape_idx).first_child = dim_list.start_index;
+
+        const type_idx = try p.parseScalarType();
+        p.ast.get(type_idx).first_child = shape_idx;
+        return type_idx;
+    }
+
+    fn parseType(p: *Parser) InternalParserError!AstNodeIndex {
+        if (p.peek(0).tag == .LBRACKET)
+            return p.parseArrayType();
+        return p.parseScalarType();
     }
 
     pub fn parseExpression(p: *Parser) InternalParserError!AstNodeIndex {
@@ -604,10 +667,78 @@ pub const Parser = struct {
     }
 
 
+    fn parseArrayLiteral(p: *Parser) InternalParserError!AstNodeIndex {
+        assert(p.peek(0).tag == .LBRACKET);
+        const bracket_token = p.token_idx;
+        p.next(); // consume [
+
+        const lit_idx = try p.ast.append(.{ .tag = .ARRAY_LIT, .token_index = bracket_token });
+        var elem_list = p.ast.startList();
+
+        while (p.peek(0).tag != .RBRACKET) {
+            if (p.peek(0).tag == .EOF) {
+                try p.emitError(p.token_idx, "']'");
+                return error.UnexpectedToken;
+            }
+            var elem_idx: AstNodeIndex = undefined;
+            if (p.peek(0).tag == .LBRACKET) {
+                elem_idx = try p.parseArrayLiteral();
+            } else {
+                elem_idx = try p.parseExpression();
+            }
+            if (p.peek(0).tag == .ELLIPSIS) {
+                const fill_idx = try p.ast.append(.{ .tag = .FILL, .token_index = p.token_idx, .first_child = elem_idx });
+                p.next(); // consume ...
+                elem_idx = fill_idx;
+            }
+            try elem_list.appendExisting(elem_idx);
+            if (p.peek(0).tag == .COMMA) p.next();
+        }
+
+        if (!try p.expectToken(.RBRACKET))
+            return error.UnexpectedToken;
+        p.next(); // consume ]
+
+        p.ast.get(lit_idx).first_child = elem_list.start_index;
+        return lit_idx;
+    }
+
+    fn parseArrayAccess(p: *Parser, target: AstNodeIndex) InternalParserError!AstNodeIndex {
+        assert(p.peek(0).tag == .LBRACKET);
+        const bracket_token = p.token_idx;
+        p.next(); // consume [
+
+        const args_idx = try p.ast.append(.{ .tag = .INDEX_ARGS, .token_index = bracket_token });
+        var idx_list = p.ast.startList();
+
+        while (p.peek(0).tag != .RBRACKET) {
+            if (p.peek(0).tag == .EOF) {
+                try p.emitError(p.token_idx, "']'");
+                return error.UnexpectedToken;
+            }
+            const idx = try p.parseExpression();
+            try idx_list.appendExisting(idx);
+            if (p.peek(0).tag == .COMMA) p.next();
+        }
+
+        if (!try p.expectToken(.RBRACKET))
+            return error.UnexpectedToken;
+        p.next(); // consume ]
+
+        p.ast.get(args_idx).first_child = idx_list.start_index;
+
+        const access_idx = try p.ast.append(.{ .tag = .ARRAY_ACCESS, .token_index = bracket_token, .first_child = target });
+        p.ast.get(target).next_sibling = args_idx;
+        return access_idx;
+    }
+
     pub fn parseSubExpr(p: *Parser) InternalParserError!AstNodeIndex {
         // std.debug.print("parseSubExpr: tag: {s}\n", .{@tagName(p.peek(0).tag)});
         var res: AstNodeIndex = undefined;
         switch (p.peek(0).tag) {
+            .LBRACKET => {
+                res = try p.parseArrayLiteral();
+            },
             .LPAREN => {
                 p.next();
                 res = try p.parseExpression();
@@ -815,13 +946,9 @@ pub const Parser = struct {
             p.next();
             const rhs = try p.parseExpression();
             p.ast.get(node_idx).first_child = rhs;
-        } else if (p.peek(0).tag == .IDENTIFIER) {
+        } else if (p.peek(0).tag == .IDENTIFIER or p.peek(0).tag == .LBRACKET) {
             // x : Type ...
-            const type_idx = try p.ast.append(.{
-                .tag = .TYPE,
-                .token_index = p.token_idx,
-            });
-            p.next();
+            const type_idx = try p.parseType();
             p.ast.get(node_idx).first_child = type_idx;
 
             if (p.peek(0).tag == .ASSIGN) {

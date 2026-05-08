@@ -48,9 +48,12 @@ pub const Token = struct {
 
         LPAREN,
         RPAREN,
+        LBRACKET,
+        RBRACKET,
 
         COLON,
         DOT,
+        ELLIPSIS,
         ASSIGN,
         MULTASSIGN,
         DIVASSIGN,
@@ -240,6 +243,14 @@ pub const Tokenizer = struct {
                 t.paren_nesting_level -= 1;
                 return t.emit(.RPAREN, 1);
             },
+            '[' => {
+                t.paren_nesting_level += 1;
+                return t.emit(.LBRACKET, 1);
+            },
+            ']' => {
+                t.paren_nesting_level -= 1;
+                return t.emit(.RBRACKET, 1);
+            },
 
             // .GE, .GT
             '>' => {
@@ -299,6 +310,8 @@ pub const Tokenizer = struct {
 
             ':' => return t.emit(.COLON, 1),
             '.' => {
+                if (tail.len >= 3 and tail[1] == '.' and tail[2] == '.')
+                    return t.emit(.ELLIPSIS, 3);
                 if (tail.len >= 2 and isNum(tail[1])) {} // fall through to number parsing below
                 else return t.emit(.DOT, 1);
             },
@@ -341,6 +354,9 @@ pub const Tokenizer = struct {
                 if (char == '.') {
                     // only 1 point allowed
                     if (point_found) return t.emit(.INVALID, len);
+                    // don't consume a '.' that's the start of '...' (ellipsis)
+                    if (t.pos + len + 1 < t.source.len and t.source[t.pos + len + 1] == '.')
+                        return t.emit(.INT_LIT, len);
                     point_found = true;
                     continue;
                 }

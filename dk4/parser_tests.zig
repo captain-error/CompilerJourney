@@ -39,8 +39,14 @@ fn testAstStructure(ast: *const AST) void {
             .STRUCTDECL       => {},
             .MEMBER           => {assert(num_kids >= 0); assert(num_kids <= 2);},
             .PARAM            => {assert(num_kids >= 0); assert(num_kids <= 2);},
-            .TYPE             => assert(num_kids == 0),
+            .TYPE             => assert(num_kids == 0 or num_kids == 1), // 0: scalar, 1: array (ARRAY_SHAPE child)
             .MEMBER_ACCESS    => assert(num_kids == 1),
+            .ARRAY_LIT        => {},
+            .FILL             => assert(num_kids == 1),
+            .ARRAY_SHAPE      => assert(num_kids >= 1),
+            .INFER_DIM        => assert(num_kids == 0),
+            .ARRAY_ACCESS     => assert(num_kids == 2),
+            .INDEX_ARGS       => assert(num_kids >= 1),
             // zig fmt: on
         }
     }
@@ -795,6 +801,186 @@ test "parse struct as function param" {
     try testParser(source, Parser.parse, expected, false);
 }
 
+test "parse 1D array literal inferred type" {
+    const source = "[1, 2, 3]";
+    const expected = .{
+        AstNodeTag.ARRAY_LIT,
+        .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" },
+        .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "2" },
+        .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse 1D array literal trailing comma" {
+    const source = "[1, 2, 3,]";
+    const expected = .{
+        AstNodeTag.ARRAY_LIT,
+        .{ AstNodeTag.ATOM, "1" },
+        .{ AstNodeTag.ATOM, "2" },
+        .{ AstNodeTag.ATOM, "3" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse typed 1D array declaration" {
+    const source = "a : [3]Int = [1, 2, 3]\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ATOM, "1" },
+            .{ AstNodeTag.ATOM, "2" },
+            .{ AstNodeTag.ATOM, "3" },
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse inferred size array declaration" {
+    const source = "a : [_]Int = [1, 2, 3]\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.INFER_DIM, Token.Tag.IDENTIFIER, "_" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ATOM, "1" },
+            .{ AstNodeTag.ATOM, "2" },
+            .{ AstNodeTag.ATOM, "3" },
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse 1D array access" {
+    const source = "a[0]";
+    const expected = .{
+        AstNodeTag.ARRAY_ACCESS,
+        .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
+        .{ AstNodeTag.INDEX_ARGS,
+            .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "0" },
+        },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse 2D array access" {
+    const source = "a[1, 2]";
+    const expected = .{
+        AstNodeTag.ARRAY_ACCESS,
+        .{ AstNodeTag.ATOM, "a" },
+        .{ AstNodeTag.INDEX_ARGS,
+            .{ AstNodeTag.ATOM, "1" },
+            .{ AstNodeTag.ATOM, "2" },
+        },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse 2D typed array declaration" {
+    const source = "a : [2,3]Int = [[1,2,3],[4,5,6]]\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.ATOM, "2" },
+                .{ AstNodeTag.ATOM, "3" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ARRAY_LIT,
+                .{ AstNodeTag.ATOM, "1" },
+                .{ AstNodeTag.ATOM, "2" },
+                .{ AstNodeTag.ATOM, "3" },
+            },
+            .{ AstNodeTag.ARRAY_LIT,
+                .{ AstNodeTag.ATOM, "4" },
+                .{ AstNodeTag.ATOM, "5" },
+                .{ AstNodeTag.ATOM, "6" },
+            },
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+test "parse array literal with fill" {
+    const source = "[1, 0..., 2]";
+    const expected = .{
+        AstNodeTag.ARRAY_LIT,
+        .{ AstNodeTag.ATOM, "1" },
+        .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "0" } },
+        .{ AstNodeTag.ATOM, "2" },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse 2D array literal with row fill" {
+    const source = "[[1,2,3], [0,0,0]...]";
+    const expected = .{
+        AstNodeTag.ARRAY_LIT,
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ATOM, "1" },
+            .{ AstNodeTag.ATOM, "2" },
+            .{ AstNodeTag.ATOM, "3" },
+        },
+        .{ AstNodeTag.FILL,
+            .{ AstNodeTag.ARRAY_LIT,
+                .{ AstNodeTag.ATOM, "0" },
+                .{ AstNodeTag.ATOM, "0" },
+                .{ AstNodeTag.ATOM, "0" },
+            },
+        },
+    };
+    try testParser(source, Parser.parseExpression, expected, false);
+}
+
+test "parse inferred 2D shape" {
+    const source = "a : [_,_]Int = [[1,2],[3,4]]\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.INFER_DIM, "_" },
+                .{ AstNodeTag.INFER_DIM, "_" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "1" }, .{ AstNodeTag.ATOM, "2" } },
+            .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "3" }, .{ AstNodeTag.ATOM, "4" } },
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+
+test "parse inferred 3D shape" {
+    const source = "a : [_,_,_]Int = [[[1,2],[3,4]], [[5,6],[7,8]]]\n";
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.INFER_DIM, "_" },
+                .{ AstNodeTag.INFER_DIM, "_" },
+                .{ AstNodeTag.INFER_DIM, "_" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "1" }, .{ AstNodeTag.ATOM, "2" } }, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "3" }, .{ AstNodeTag.ATOM, "4" } } },
+            .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "5" }, .{ AstNodeTag.ATOM, "6" } }, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "7" }, .{ AstNodeTag.ATOM, "8" } } },
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+
+//--------------------------------------------------------------------------
 
 
 /// Returns true if the passed type will coerce to []const u8.
