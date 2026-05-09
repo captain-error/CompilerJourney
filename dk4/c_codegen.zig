@@ -20,6 +20,16 @@ const AssignmentKind = ft_ast.AssignmentKind;
 
 const Writer = std.Io.Writer;
 
+const loop_var_names = [ft_ast.MAX_ARRAY_NDIM][]const u8{
+    "_dk_i0", "_dk_i1", "_dk_i2", "_dk_i3",
+    "_dk_i4", "_dk_i5", "_dk_i6", "_dk_i7",
+};
+
+const IndexVal = union(enum) {
+    literal: u16,
+    loop_var: u8, // dim number → loop_var_names[dim]
+};
+
 const CCodegen = struct {
     ft: *const FtAst,
     w: *Writer,
@@ -106,13 +116,13 @@ const CCodegen = struct {
         self.indent += 1;
 
         // Emit result variable declaration (non-void, non-main gets it too; main gets it for printing)
-        if (fn_decl.return_type != .VOID or is_main) {
+        if (fn_decl.return_type != DkType.VOID or is_main) {
             if (is_main) {
                 // main uses double result for the printf
                 // Actually, main's return_type should be whatever the program returns
                 // but C main returns int. The result var holds the computed value.
             }
-            if (fn_decl.return_type != .VOID) {
+            if (fn_decl.return_type != DkType.VOID) {
                 try self.emitIndent();
                 try self.emitTypeName(fn_decl.return_type);
                 try self.emitStr(" result;\n");
@@ -124,14 +134,14 @@ const CCodegen = struct {
 
         // Main epilogue: printf + return 0
         if (is_main) {
-            if (fn_decl.return_type != .VOID) {
+            if (fn_decl.return_type != DkType.VOID) {
                 try self.emitIndent();
                 try self.emitPrintf(fn_decl.return_type);
                 try self.emitByte('\n');
             }
             try self.emitIndent();
             try self.emitStr("return 0;\n");
-        } else if (fn_decl.return_type != .VOID) {
+        } else if (fn_decl.return_type != DkType.VOID) {
             try self.emitIndent();
             try self.emitStr("return result;\n");
         }
@@ -157,9 +167,13 @@ const CCodegen = struct {
         for (params, 0..) |param, i| {
             if (i > 0)
                 try self.emitStr(", ");
-            try self.emitTypeName(param.type_);
-            try self.emitByte(' ');
-            try self.emitStr(param.name);
+            if (param.type_.isArray()) {
+                try self.emitArrayParam(param.name, param.type_);
+            } else {
+                try self.emitTypeName(param.type_);
+                try self.emitByte(' ');
+                try self.emitStr(param.name);
+            }
         }
         try self.emitByte(')');
     }
@@ -186,6 +200,15 @@ const CCodegen = struct {
     fn emitMangledTypeName(self: *CCodegen, t: DkType) EmitError!void {
         if (t.isStruct()) {
             try self.emitMangledStructName(self.ft.struct_decls.items[t.structInstanceIdx()]);
+        } else if (t.isArray()) {
+            const ai = &self.ft.array_instances.items[t.arrayInstanceIdx()];
+            try self.emitStr("Arr");
+            for (0..ai.ndim) |i| {
+                try self.emitByte('_');
+                try self.w.print("{d}", .{ai.shape[i]});
+            }
+            try self.emitByte('_');
+            try self.emitStr(ai.elem_type.langName());
         } else {
             try self.emitStr(t.langName());
         }
@@ -206,14 +229,18 @@ const CCodegen = struct {
     fn emitStatement(self: *CCodegen, stmt: Statement) EmitError!void {
         switch (stmt.kind) {
             .VAR_DECL => |vd| {
-                try self.emitIndent();
                 const var_decl = self.ft.var_decls.items[vd.var_decl_idx];
-                try self.emitTypeName(var_decl.type_);
-                try self.emitByte(' ');
-                try self.emitStr(var_decl.name);
-                try self.emitStr(" = ");
-                try self.emitExpression(vd.rhs, 0, false);
-                try self.emitStr(";\n");
+                if (var_decl.type_.isArray()) {
+                    try self.emitArrayLitAssignment(var_decl.name, var_decl.type_, vd.rhs);
+                } else {
+                    try self.emitIndent();
+                    try self.emitTypeName(var_decl.type_);
+                    try self.emitByte(' ');
+                    try self.emitStr(var_decl.name);
+                    try self.emitStr(" = ");
+                    try self.emitExpression(vd.rhs, 0, false);
+                    try self.emitStr(";\n");
+                }
             },
             .ASSIGNMENT => |a| {
                 try self.emitIndent();
@@ -308,7 +335,7 @@ const CCodegen = struct {
             .BINARY_OP => |bin| {
                 if (bin.op == .POW) {
                     // pow(lhs, rhs) — cast to int64_t if result is INT
-                    if (expr.type_ == .INT)
+                    if (expr.type_ == DkType.INT)
                         try self.emitStr("(int64_t)");
                     try self.emitStr("pow(");
                     try self.emitExpression(bin.lhs, 0, false);
@@ -377,11 +404,21 @@ const CCodegen = struct {
                 try self.emitByte('.');
                 try self.emitStr(member.name);
             },
-            .INVALID => unreachable,
+            .ARRAY_ACCESS => |aa| {
+                try self.emitExpression(aa.base, 14, false);
+                var idx_expr = aa.indices_start;
+                while (idx_expr != 0) {
+                    try self.emitByte('[');
+                    try self.emitExpression(idx_expr, 0, false);
+                    try self.emitByte(']');
+                    idx_expr = self.ft.expressions.items[idx_expr].next_sibling;
+                }
+            },
+            .ARRAY_LIT => unreachable, // handled by emitArrayLitBody
+            .FILL       => unreachable, // handled by emitArrayLitBody
+            .INVALID    => unreachable,
         }
     }
-
-    // ----- Operator tables -----
 
     fn opPrecedence(op: BinaryOp) u8 {
         return switch (op) {
@@ -417,12 +454,14 @@ const CCodegen = struct {
     // ----- Printf for main -----
 
     fn emitPrintf(self: *CCodegen, result_type: DkType) EmitError!void {
-        switch (result_type) {
-            .INT => try self.emitStr("printf(\"%ld\\n\", result);"),
-            .FLOAT => try self.emitStr("printf(\"%.6f\\n\", result);"),
-            .BOOL => try self.emitStr("printf(\"%s\\n\", result ? \"true\" : \"false\");"),
-            else => unreachable,
-        }
+        if (result_type == DkType.INT)
+            try self.emitStr("printf(\"%ld\\n\", result);")
+        else if (result_type == DkType.FLOAT)
+            try self.emitStr("printf(\"%.6f\\n\", result);")
+        else if (result_type == DkType.BOOL)
+            try self.emitStr("printf(\"%s\\n\", result ? \"true\" : \"false\");")
+        else
+            unreachable;
     }
 
     // ----- Type names -----
@@ -432,13 +471,150 @@ const CCodegen = struct {
             try self.emitMangledStructName(self.ft.struct_decls.items[t.structInstanceIdx()]);
             return;
         }
-        try self.emitStr(switch (t) {
-            .INT => "int64_t",
-            .FLOAT => "double",
-            .BOOL => "bool",
-            .VOID => "void",
-            else => unreachable,
-        });
+        if (t.isArray()) unreachable;
+        if (t == DkType.INT)
+            try self.emitStr("int64_t")
+        else if (t == DkType.FLOAT)
+            try self.emitStr("double")
+        else if (t == DkType.BOOL)
+            try self.emitStr("bool")
+        else if (t == DkType.VOID)
+            try self.emitStr("void")
+        else
+            unreachable;
+    }
+
+    // ----- Array helpers -----
+
+    fn emitArrayDimSuffix(self: *CCodegen, ai: *const ft_ast.ArrayInstance, first_as_comment: bool) EmitError!void {
+        for (0..ai.ndim) |i| {
+            if (i == 0 and first_as_comment) {
+                try self.w.print("[/*{d}*/]", .{ai.shape[i]});
+            } else {
+                try self.w.print("[{d}]", .{ai.shape[i]});
+            }
+        }
+    }
+
+    fn emitArrayLhs(self: *CCodegen, name: []const u8, outer_indices: []const IndexVal, last: IndexVal) EmitError!void {
+        try self.emitStr(name);
+        for (outer_indices) |idx| {
+            try self.emitByte('[');
+            switch (idx) {
+                .literal  => |v| try self.w.print("{d}", .{v}),
+                .loop_var => |d| try self.emitStr(loop_var_names[d]),
+            }
+            try self.emitByte(']');
+        }
+        try self.emitByte('[');
+        switch (last) {
+            .literal  => |v| try self.w.print("{d}", .{v}),
+            .loop_var => |d| try self.emitStr(loop_var_names[d]),
+        }
+        try self.emitByte(']');
+    }
+
+    fn emitArrayLitBody(self: *CCodegen, name: []const u8, expr_idx: ExpressionIndex, indices: []IndexVal, dim: u8) EmitError!void {
+        const expr = self.ft.expressions.items[expr_idx];
+        const ai = &self.ft.array_instances.items[expr.type_.arrayInstanceIdx()];
+
+        var non_fill_count: u16 = 0;
+        {
+            var ch = expr.kind.ARRAY_LIT.elems_start;
+            while (ch != 0) {
+                const ce = self.ft.expressions.items[ch];
+                if (ce.kind != .FILL) non_fill_count += 1;
+                ch = ce.next_sibling;
+            }
+        }
+        const fill_count: u16 = ai.shape[0] - non_fill_count;
+
+        var pos: u16 = 0;
+        var ch = expr.kind.ARRAY_LIT.elems_start;
+        while (ch != 0) {
+            const ce = self.ft.expressions.items[ch];
+            const next = ce.next_sibling;
+            switch (ce.kind) {
+                .FILL => |fill| {
+                    const fill_start = pos;
+                    const fill_end   = pos + fill_count;
+                    const lv = loop_var_names[dim];
+                    try self.emitIndent();
+                    try self.w.print("for (int64_t {s} = {d}; {s} < {d}; {s}++) ", .{ lv, fill_start, lv, fill_end, lv });
+                    const fve = self.ft.expressions.items[fill.value];
+                    if (fve.kind == .ARRAY_LIT) {
+                        try self.emitStr("{\n");
+                        self.indent += 1;
+                        var new_indices: []IndexVal = undefined;
+                        new_indices.ptr = indices.ptr;
+                        new_indices.len = indices.len + 1;
+                        new_indices[indices.len] = .{ .loop_var = dim };
+                        try self.emitArrayLitBody(name, fill.value, new_indices, dim + 1);
+                        self.indent -= 1;
+                        try self.emitIndent();
+                        try self.emitStr("}\n");
+                    } else {
+                        try self.emitByte('\n');
+                        self.indent += 1;
+                        try self.emitIndent();
+                        try self.emitArrayLhs(name, indices, .{ .loop_var = dim });
+                        try self.emitStr(" = ");
+                        try self.emitExpression(fill.value, 0, false);
+                        try self.emitStr(";\n");
+                        self.indent -= 1;
+                    }
+                    pos = fill_end;
+                },
+                .ARRAY_LIT => {
+                    var new_indices: []IndexVal = undefined;
+                    new_indices.ptr = indices.ptr;
+                    new_indices.len = indices.len + 1;
+                    new_indices[indices.len] = .{ .literal = pos };
+                    try self.emitArrayLitBody(name, ch, new_indices, dim + 1);
+                    pos += 1;
+                },
+                else => {
+                    try self.emitIndent();
+                    try self.emitArrayLhs(name, indices, .{ .literal = pos });
+                    try self.emitStr(" = ");
+                    try self.emitExpression(ch, 0, false);
+                    try self.emitStr(";\n");
+                    pos += 1;
+                },
+            }
+            ch = next;
+        }
+    }
+
+    fn emitArrayLitAssignment(self: *CCodegen, name: []const u8, array_type: DkType, rhs_expr: ExpressionIndex) EmitError!void {
+        try self.emitArrayDecl(name, array_type);
+        try self.emitIndent();
+        try self.emitStr("{ // begin array literal assignment\n");
+        self.indent += 1;
+        var indices_buf: [ft_ast.MAX_ARRAY_NDIM]IndexVal = undefined;
+        try self.emitArrayLitBody(name, rhs_expr, indices_buf[0..0], 0);
+        self.indent -= 1;
+        try self.emitIndent();
+        try self.emitStr("} // end array literal assignment\n");
+    }
+
+    fn emitArrayDecl(self: *CCodegen, name: []const u8, array_type: DkType) EmitError!void {
+        const ai = &self.ft.array_instances.items[array_type.arrayInstanceIdx()];
+        try self.emitIndent();
+        try self.emitTypeName(ai.elem_type);
+        try self.emitByte(' ');
+        try self.emitStr(name);
+        try self.emitArrayDimSuffix(ai, false);
+        try self.emitStr(";\n");
+    }
+
+    fn emitArrayParam(self: *CCodegen, name: []const u8, array_type: DkType) EmitError!void {
+        const ai = &self.ft.array_instances.items[array_type.arrayInstanceIdx()];
+        try self.emitStr("const ");
+        try self.emitTypeName(ai.elem_type);
+        try self.emitByte(' ');
+        try self.emitStr(name);
+        try self.emitArrayDimSuffix(ai, true);
     }
 
     // ----- Output helpers -----
@@ -770,6 +946,156 @@ test "generate C for function taking struct parameter" {
         \\
     ;
 
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for function taking array parameter" {
+    const source =
+        \\fn sum3(a)
+        \\    result = a[0] + a[1] + a[2]
+        \\
+        \\fn main()
+        \\    a := [10, 20, 30]
+        \\    result = sum3(a)
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\int64_t sum3__Arr_3_Int(const int64_t a[/*3*/]);
+        \\
+        \\int64_t sum3__Arr_3_Int(const int64_t a[/*3*/]) {
+        \\    int64_t result;
+        \\    result = a[0] + a[1] + a[2];
+        \\    return result;
+        \\}
+        \\
+        \\int main(void) {
+        \\    int64_t result;
+        \\    int64_t a[3];
+        \\    { // begin array literal assignment
+        \\        a[0] = 10;
+        \\        a[1] = 20;
+        \\        a[2] = 30;
+        \\    } // end array literal assignment
+        \\    result = sum3__Arr_3_Int(a);
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for 1D array with fill" {
+    const source =
+        \\fn main()
+        \\    a : [4]Int = [1, 0..., 2]
+        \\    result = a[0]
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\int main(void) {
+        \\    int64_t result;
+        \\    int64_t a[4];
+        \\    { // begin array literal assignment
+        \\        a[0] = 1;
+        \\        for (int64_t _dk_i0 = 1; _dk_i0 < 3; _dk_i0++)
+        \\            a[_dk_i0] = 0;
+        \\        a[3] = 2;
+        \\    } // end array literal assignment
+        \\    result = a[0];
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for 2D array literal" {
+    const source =
+        \\fn main()
+        \\    a := [[1, 2], [3, 4]]
+        \\    result = a[0, 0]
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\int main(void) {
+        \\    int64_t result;
+        \\    int64_t a[2][2];
+        \\    { // begin array literal assignment
+        \\        a[0][0] = 1;
+        \\        a[0][1] = 2;
+        \\        a[1][0] = 3;
+        \\        a[1][1] = 4;
+        \\    } // end array literal assignment
+        \\    result = a[0][0];
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for 3D array literal" {
+    const source =
+        \\fn main()
+        \\    a : [3,2,4]Int = [[[1, 2...,], [3...,4]..., [5...]]..., [[6...]...]]
+        \\    result = a[0, 0, 0]
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\int main(void) {
+        \\    int64_t result;
+        \\    int64_t a[3][2][4];
+        \\    { // begin array literal assignment
+        \\        for (int64_t _dk_i0 = 0; _dk_i0 < 2; _dk_i0++) {
+        \\            a[_dk_i0][0][0] = 1;
+        \\            for (int64_t _dk_i2 = 1; _dk_i2 < 3; _dk_i2++) 
+        \\                a[_dk_i0][0][_dk_i2] = 2;
+        \\            for (int64_t _dk_i1 = 1; _dk_i1 < 2; _dk_i1++) {
+        \\                for (int64_t _dk_i2 = 0; _dk_i2 < 2; _dk_i2++) 
+        \\                    a[_dk_i0][_dk_i1][_dk_i2] = 3;
+        \\                a[_dk_i0][_dk_i1][2] = 4;
+        \\            }
+        \\            for (int64_t _dk_i2 = 0; _dk_i2 < 3; _dk_i2++) 
+        \\                a[_dk_i0][2][_dk_i2] = 5;
+        \\        }
+        \\        for (int64_t _dk_i1 = 0; _dk_i1 < 2; _dk_i1++) {
+        \\            for (int64_t _dk_i2 = 0; _dk_i2 < 3; _dk_i2++) 
+        \\                a[2][_dk_i1][_dk_i2] = 6;
+        \\        }
+        \\    } // end array literal assignment
+        \\    result = a[0][0][0];
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
 
     try runCompilerAndCompareOutput(source, expected);
 }

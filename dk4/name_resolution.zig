@@ -774,7 +774,28 @@ const Resolver = struct {
             .UNARY_OP => try r.resolveExpr(node.first_child),
             .CALL_OR_INST => try r.resolveCallOrInst(expr_idx),
             .MEMBER_ACCESS => try r.resolveMemberAccessBase(expr_idx),
+            .ARRAY_ACCESS => try r.resolveArrayAccess(expr_idx),
+            .ARRAY_LIT => try r.resolveArrayLit(expr_idx),
+            .FILL => try r.resolveExpr(node.first_child),
             else => {},
+        }
+    }
+
+    fn resolveArrayAccess(r: *Resolver, node_idx: AstNodeIndex) !void {
+        // first_child = base expr, base.next_sibling = INDEX_ARGS
+        const node = r.ast.get(node_idx);
+        try r.resolveExpr(node.first_child);
+        const index_args = r.ast.get(node.first_child).next_sibling;
+        var idx = r.ast.get(index_args).first_child;
+        while (idx != 0) : (idx = r.ast.get(idx).next_sibling) {
+            try r.resolveExpr(idx);
+        }
+    }
+
+    fn resolveArrayLit(r: *Resolver, node_idx: AstNodeIndex) !void {
+        var child = r.ast.get(node_idx).first_child;
+        while (child != 0) : (child = r.ast.get(child).next_sibling) {
+            try r.resolveExpr(child);
         }
     }
 

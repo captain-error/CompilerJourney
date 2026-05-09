@@ -979,6 +979,52 @@ test "parse inferred 3D shape" {
     try testParser(source, Parser.parserDeclOrAssign, expected, false);
 }
 
+test "parse complex 3D literal" {
+    const source = "a : [3,2,4]Int = [[[1, 2...,], [3...,4]..., [5...]]..., [[6...]...]]\n";
+        
+    const expected = .{
+        AstNodeTag.DECLARATION, "a",
+        .{ AstNodeTag.TYPE, "Int",
+            .{ AstNodeTag.ARRAY_SHAPE,
+                .{ AstNodeTag.ATOM, "3" },
+                .{ AstNodeTag.ATOM, "2" },
+                .{ AstNodeTag.ATOM, "4" },
+            },
+        },
+        .{ AstNodeTag.ARRAY_LIT,
+            .{ AstNodeTag.FILL,
+                .{ AstNodeTag.ARRAY_LIT,
+                    .{ AstNodeTag.ARRAY_LIT,
+                        .{ AstNodeTag.ATOM, "1" },
+                        .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "2" } },
+                    },
+                    .{ AstNodeTag.FILL,
+                        .{ AstNodeTag.ARRAY_LIT,
+                            .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "3" } },
+                            .{ AstNodeTag.ATOM, "4" },
+                        },
+                    },
+                    .{ AstNodeTag.ARRAY_LIT,
+                        .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "5" } },
+                    },
+                },
+            },
+
+            .{ AstNodeTag.ARRAY_LIT,
+                .{ AstNodeTag.FILL,
+                    .{ AstNodeTag.ARRAY_LIT,
+                        .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "6" } },
+                    },
+                },
+            },
+
+        },
+    };
+    try testParser(source, Parser.parserDeclOrAssign, expected, false);
+}
+
+
+
 
 //--------------------------------------------------------------------------
 

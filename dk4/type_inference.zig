@@ -44,9 +44,9 @@ const MAX_TYPEVARS = 32;
 
 fn dkTypeFromBuiltinDecl(decl: DeclIndex) ?DkType {
     return switch (decl) {
-        .Int => .INT,
-        .Float => .FLOAT,
-        .Bool => .BOOL,
+        .Int => DkType.INT,
+        .Float => DkType.FLOAT,
+        .Bool => DkType.BOOL,
         else => null,
     };
 }
@@ -57,7 +57,7 @@ fn dkTypeFromBuiltinDecl(decl: DeclIndex) ?DkType {
 
 pub const FunctionInstance = struct {
     fn_template_idx: nr.FunctionTemplates.Index,
-    return_type: DkType = .UNKNOWN,
+    return_type: DkType = DkType.UNKNOWN,
     param_count: u8 = 0,
     first_param_type_idx: Types.Index = .NONE,
     fn_decl_idx: FnDeclIndex = 0, // index into FtAst.fn_decls
@@ -78,7 +78,7 @@ pub const FunctionInstanceHashContext = struct {
     types: *const Types,
 
     fn combineHash(h: u64, t: DkType) u64 {
-        return h ^ (@as(u64, @intFromEnum(t)) +% 0x9e3779b9 +% (h << 6) +% (h >> 2));
+        return h ^ (@as(u64, @as(u32, @bitCast(t))) +% 0x9e3779b9 +% (h << 6) +% (h >> 2));
     }
 
     fn hashKey(ctx: FunctionInstanceHashContext, key: FunctionInstanceKey) u64 {
@@ -218,6 +218,67 @@ pub fn infer(
 }
 
 // -----------------------------------------------------------------------
+// Array shape inference helpers (free functions, no TypeInferer needed)
+// -----------------------------------------------------------------------
+
+const DimInfo = struct {
+    count: u16,
+    has_fill: bool,
+};
+
+const ArrayShape = struct {
+    dims: [ft_ast.MAX_ARRAY_NDIM]DimInfo,
+    ndim: u8,
+    extra_fill_node: AstNodeIndex, // 0 = ok; non-zero = second FILL found (node idx of offender)
+};
+
+fn arrayShapeFromLit(ast: *const AST, lit_node_idx: AstNodeIndex) ArrayShape {
+    const lit_node = ast.get(lit_node_idx);
+    var result = ArrayShape{
+        .dims = undefined,
+        .ndim = 1,
+        .extra_fill_node = 0,
+    };
+    result.dims[0] = .{ .count = 0, .has_fill = false };
+    var inner: ?ArrayShape = null;
+    var fill_seen = false;
+
+    var child_iter = lit_node.children(ast);
+    while (child_iter.nextIdx()) |child_idx| {
+        const child = ast.get(child_idx);
+        if (child.tag == .FILL) {
+            if (!fill_seen) {
+                fill_seen = true;
+                result.dims[0].has_fill = true;
+                if (child.first_child != 0) {
+                    const fill_val = ast.get(child.first_child);
+                    if (fill_val.tag == .ARRAY_LIT and inner == null)
+                        inner = arrayShapeFromLit(ast, child.first_child);
+                }
+            } else {
+                result.extra_fill_node = child_idx;
+            }
+        } else if (child.tag == .ARRAY_LIT) {
+            result.dims[0].count += 1;
+            if (inner == null)
+                inner = arrayShapeFromLit(ast, child_idx);
+        } else {
+            result.dims[0].count += 1;
+        }
+    }
+
+    if (inner) |inner_shape| {
+        result.ndim = 1 + inner_shape.ndim;
+        for (0..inner_shape.ndim) |i|
+            result.dims[1 + i] = inner_shape.dims[i];
+        if (inner_shape.extra_fill_node != 0 and result.extra_fill_node == 0)
+            result.extra_fill_node = inner_shape.extra_fill_node;
+    }
+
+    return result;
+}
+
+// -----------------------------------------------------------------------
 // TypeInferer
 // -----------------------------------------------------------------------
 
@@ -289,9 +350,9 @@ const TypeInferer = struct {
     }
 
     fn expectType(ti: *TypeInferer, node_idx: AstNodeIndex, actual: DkType, comptime expected: DkType) !void {
-        if (actual == .ERROR) return;
+        if (actual == DkType.ERROR) return;
         if (actual != expected)
-            try ti.addError(.{ .wrong_type = .{ .ast_node = node_idx, .actual = actual, .expected = "must be of type " ++ @tagName(expected) } });
+            try ti.addError(.{ .wrong_type = .{ .ast_node = node_idx, .actual = actual, .expected = comptime expected.langName() } });
     }
 
     // -----------------------------------------------------------------------
@@ -319,13 +380,13 @@ const TypeInferer = struct {
         var scratch: [MAX_NUM_FUNCTION_PARAMS]DkType = undefined;
         for (params, 0..) |param, i| {
             switch (param.type_) {
-                .CONCRETE => |decl_idx| scratch[i] = dkTypeFromBuiltinDecl(decl_idx) orelse .UNKNOWN,
+                .CONCRETE => |decl_idx| scratch[i] = dkTypeFromBuiltinDecl(decl_idx) orelse DkType.UNKNOWN,
                 .TYPEVAR => unreachable,
-                .UNRESOLVED => scratch[i] = .UNKNOWN,
+                .UNRESOLVED => scratch[i] = DkType.UNKNOWN,
             }
         }
         const param_types = scratch[0..fn_template.param_count];
-        return try ti.actuallyInstantiateFunction(ft_idx, fn_template, param_types, .UNKNOWN);
+        return try ti.actuallyInstantiateFunction(ft_idx, fn_template, param_types, DkType.UNKNOWN);
     }
 
     fn instantiateFunction(ti: *TypeInferer, fn_call_ast_idx: AstNodeIndex, ft_idx: nr.FunctionTemplates.Index, argument_types: []const DkType) !DkType {
@@ -338,9 +399,9 @@ const TypeInferer = struct {
 
         // Check for existing instance
         if (ti.fn_instances.getPtr(.{ .template_idx = ft_idx, .param_types = argument_types })) |existing| {
-            if (existing.return_type == .UNKNOWN) {
+            if (existing.return_type == DkType.UNKNOWN) {
                 try ti.addError(.{ .return_type_missing_for_recursive_fn = fn_template.ast_idx });
-                return .ERROR;
+                return DkType.ERROR;
             }
             return existing.return_type;
         }
@@ -357,10 +418,10 @@ const TypeInferer = struct {
             switch (param.type_) {
                 .TYPEVAR => {}, // generic — will be resolved by arg_type
                 .CONCRETE => |decl_idx| {
-                    const expected_type = dkTypeFromBuiltinDecl(decl_idx) orelse .UNKNOWN;
-                    if (expected_type != arg_type and arg_type != .ERROR) {
-                        try ti.addError(.{ .wrong_type = .{ .ast_node = fn_argument_node_idx, .expected = @tagName(expected_type), .actual = arg_type } });
-                        return .ERROR;
+                    const expected_type = dkTypeFromBuiltinDecl(decl_idx) orelse DkType.UNKNOWN;
+                    if (expected_type != arg_type and arg_type != DkType.ERROR) {
+                        try ti.addError(.{ .wrong_type = .{ .ast_node = fn_argument_node_idx, .expected = expected_type.langName(), .actual = arg_type } });
+                        return DkType.ERROR;
                     }
                 },
                 .UNRESOLVED => {},
@@ -372,7 +433,7 @@ const TypeInferer = struct {
             _ = ti.fn_instantiation_ast_idx_stack.pop();
         }
 
-        return ti.actuallyInstantiateFunction(ft_idx, fn_template, argument_types, .UNKNOWN);
+        return ti.actuallyInstantiateFunction(ft_idx, fn_template, argument_types, DkType.UNKNOWN);
     }
 
     fn actuallyInstantiateFunction(ti: *TypeInferer, ft_idx: nr.FunctionTemplates.Index, fn_template: *const nr.FunctionTemplate, param_types: []const DkType, return_type: DkType) !DkType {
@@ -482,8 +543,8 @@ const TypeInferer = struct {
         // Resolve return type from result variable
         const result_var = ti.ft.var_decls.items[result_decl_idx];
         const actual_return_type = result_var.type_;
-        if (inst.return_type == .UNKNOWN) {
-            inst.return_type = if (actual_return_type == .UNKNOWN) .VOID else actual_return_type;
+        if (inst.return_type == DkType.UNKNOWN) {
+            inst.return_type = if (actual_return_type == DkType.UNKNOWN) DkType.VOID else actual_return_type;
         }
         ti.ft.fn_decls.items[fn_decl_idx].return_type = inst.return_type;
 
@@ -597,6 +658,258 @@ const TypeInferer = struct {
         };
     }
 
+    fn checkStructAnnotation(ti: *TypeInferer, ast_idx: AstNodeIndex, annotation_decl_idx: DeclIndex, rhs_type: DkType) !void {
+        if (rhs_type == DkType.ERROR) return;
+        if (!rhs_type.isStruct()) {
+            try ti.addError(.{ .member_access_on_non_struct = .{ .ast_node = ast_idx, .actual = rhs_type } });
+            return;
+        }
+        const rhs_template = ti.struct_instances.items[rhs_type.structInstanceIdx()].template_idx;
+        for (ti.di.struct_templates.items[1..], 1..) |template, i| {
+            if (@as(nr.StructTemplates.Index, @enumFromInt(i)) == rhs_template) {
+                if (template.decl_idx != annotation_decl_idx)
+                    try ti.addError(.{ .type_mismatch = .{ .ast_node = ast_idx, .lhs = DkType.UNKNOWN, .rhs = rhs_type } });
+                return;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Array inference helpers
+    // -----------------------------------------------------------------------
+
+    const ArrayAnnotation = struct {
+        ndim: u8,
+        dims: [ft_ast.MAX_ARRAY_NDIM]?u16, // null = INFER_DIM
+        elem_type: DkType,
+    };
+
+    fn resolveArrayAnnotation(ti: *TypeInferer, type_node_idx: AstNodeIndex) ?ArrayAnnotation {
+        const type_node = ti.ast.get(type_node_idx);
+        assert(type_node.tag == .TYPE);
+
+        const elem_decl_idx = ti.di.name_resolution[type_node_idx];
+        const elem_type = dkTypeFromBuiltinDecl(elem_decl_idx) orelse return null;
+
+        const shape_node_idx = type_node.first_child;
+        const shape_node = ti.ast.get(shape_node_idx);
+        assert(shape_node.tag == .ARRAY_SHAPE);
+
+        var annotation = ArrayAnnotation{
+            .ndim = 0,
+            .dims = .{null} ** ft_ast.MAX_ARRAY_NDIM,
+            .elem_type = elem_type,
+        };
+        var child_iter = shape_node.children(ti.ast);
+        while (child_iter.nextIdx()) |dim_idx| {
+            const dim_node = ti.ast.get(dim_idx);
+            if (dim_node.tag == .INFER_DIM) {
+                annotation.dims[annotation.ndim] = null;
+            } else {
+                const size = std.fmt.parseInt(u16, ti.tokens[dim_node.token_index].str(ti.source), 10) catch unreachable;
+                annotation.dims[annotation.ndim] = size;
+            }
+            annotation.ndim += 1;
+        }
+        return annotation;
+    }
+
+    fn getOrCreateArrayInstance(ti: *TypeInferer, shape: []const u16, elem_type: DkType) !DkType {
+        // TODO: replace linear scan with hash map for large programs
+        const ndim: u8 = @intCast(shape.len);
+        for (ti.ft.array_instances.items, 0..) |ai, i| {
+            if (ai.ndim != ndim) continue;
+            if (ai.elem_type != elem_type) continue;
+            if (!std.mem.eql(u16, ai.shape[0..ndim], shape)) continue;
+            return DkType.fromArrayInstance(@intCast(i));
+        }
+        const idx = ti.ft.array_instances.items.len;
+        var new_instance = ft_ast.ArrayInstance{
+            .elem_type = elem_type,
+            .ndim = ndim,
+            .shape = .{0} ** ft_ast.MAX_ARRAY_NDIM,
+        };
+        @memcpy(new_instance.shape[0..ndim], shape);
+        try ti.ft.array_instances.append(ti.gpa, new_instance);
+        return DkType.fromArrayInstance(@intCast(idx));
+    }
+
+    fn setArrayExprType(ti: *TypeInferer, expr_idx: ExpressionIndex, array_type: DkType) !void {
+        ti.ft.expressions.items[expr_idx].type_ = array_type;
+        const ai = ti.ft.array_instances.items[array_type.arrayInstanceIdx()];
+        if (ai.ndim == 1) {
+            var child_expr = ti.ft.expressions.items[expr_idx].kind.ARRAY_LIT.elems_start;
+            while (child_expr != 0) {
+                const next = ti.ft.expressions.items[child_expr].next_sibling;
+                if (ti.ft.expressions.items[child_expr].kind == .FILL)
+                    ti.ft.expressions.items[child_expr].type_ = ai.elem_type;
+                child_expr = next;
+            }
+        } else {
+            const inner_type = try ti.getOrCreateArrayInstance(ai.shape[1..ai.ndim], ai.elem_type);
+            var child_expr = ti.ft.expressions.items[expr_idx].kind.ARRAY_LIT.elems_start;
+            while (child_expr != 0) {
+                const next = ti.ft.expressions.items[child_expr].next_sibling;
+                switch (ti.ft.expressions.items[child_expr].kind) {
+                    .ARRAY_LIT => try ti.setArrayExprType(child_expr, inner_type),
+                    .FILL => ti.ft.expressions.items[child_expr].type_ = inner_type,
+                    else => {},
+                }
+                child_expr = next;
+            }
+        }
+    }
+
+    const ArrayLitResult = struct {
+        expr_idx: ExpressionIndex,
+        shape: ArrayShape,
+        elem_type: DkType,
+    };
+
+    fn inferArrayLit(ti: *TypeInferer, ast_idx: AstNodeIndex) !ArrayLitResult {
+        const shape = arrayShapeFromLit(ti.ast, ast_idx);
+        if (shape.extra_fill_node != 0)
+            try ti.addError(.{ .multiple_fills_in_array_literal = shape.extra_fill_node });
+
+        const node = ti.ast.get(ast_idx);
+        var elem_type: DkType = DkType.UNKNOWN;
+        var first_inner_shape: ?ArrayShape = null;
+        var first_elem_expr: ExpressionIndex = 0;
+        var prev_elem_expr: ExpressionIndex = 0;
+
+        var child_iter = node.children(ti.ast);
+        while (child_iter.nextIdx()) |child_ast_idx| {
+            const child_node = ti.ast.get(child_ast_idx);
+            if (child_node.tag == .FILL) {
+                const fill_val_ast_idx = child_node.first_child;
+                const fill_val_node = ti.ast.get(fill_val_ast_idx);
+                var fill_val_expr: ExpressionIndex = 0;
+                var fill_elem_type: DkType = DkType.UNKNOWN;
+                if (fill_val_node.tag == .ARRAY_LIT) {
+                    const inner = try ti.inferArrayLit(fill_val_ast_idx);
+                    fill_val_expr = inner.expr_idx;
+                    fill_elem_type = inner.elem_type;
+                } else {
+                    fill_val_expr = try ti.inferExpr(fill_val_ast_idx);
+                    fill_elem_type = ti.ft.expressions.items[fill_val_expr].type_;
+                }
+                if (elem_type == DkType.UNKNOWN) {
+                    elem_type = fill_elem_type;
+                } else if (fill_elem_type != DkType.UNKNOWN and fill_elem_type != DkType.ERROR and elem_type != fill_elem_type) {
+                    try ti.addError(.{ .inconsistent_elem_types_in_array_lit = .{ .ast_node = child_ast_idx, .expected = elem_type, .actual = fill_elem_type } });
+                }
+                const fill_expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+                try ti.ft.expressions.append(ti.gpa, .{
+                    .type_ = DkType.UNKNOWN,
+                    .kind = .{ .FILL = .{ .value = fill_val_expr } },
+                });
+                if (first_elem_expr == 0)
+                    first_elem_expr = fill_expr_idx
+                else
+                    ti.ft.expressions.items[prev_elem_expr].next_sibling = fill_expr_idx;
+                prev_elem_expr = fill_expr_idx;
+            } else if (child_node.tag == .ARRAY_LIT) {
+                const inner = try ti.inferArrayLit(child_ast_idx);
+                if (first_inner_shape) |ref_shape| {
+                    for (0..@min(ref_shape.ndim, inner.shape.ndim)) |d| {
+                        if (!ref_shape.dims[d].has_fill and !inner.shape.dims[d].has_fill and
+                            ref_shape.dims[d].count != inner.shape.dims[d].count)
+                        {
+                            try ti.addError(.{ .inconsistent_inner_dim = .{ .ast_node = child_ast_idx, .expected = ref_shape.dims[d].count, .actual = inner.shape.dims[d].count } });
+                            break;
+                        }
+                    }
+                } else {
+                    first_inner_shape = inner.shape;
+                }
+                if (elem_type == DkType.UNKNOWN) {
+                    elem_type = inner.elem_type;
+                } else if (inner.elem_type != DkType.UNKNOWN and inner.elem_type != DkType.ERROR and elem_type != inner.elem_type) {
+                    try ti.addError(.{ .inconsistent_elem_types_in_array_lit = .{ .ast_node = child_ast_idx, .expected = elem_type, .actual = inner.elem_type } });
+                }
+                if (first_elem_expr == 0)
+                    first_elem_expr = inner.expr_idx
+                else
+                    ti.ft.expressions.items[prev_elem_expr].next_sibling = inner.expr_idx;
+                prev_elem_expr = inner.expr_idx;
+            } else {
+                const child_expr = try ti.inferExpr(child_ast_idx);
+                const child_type = ti.ft.expressions.items[child_expr].type_;
+                if (elem_type == DkType.UNKNOWN) {
+                    elem_type = child_type;
+                } else if (child_type != DkType.UNKNOWN and child_type != DkType.ERROR and elem_type != child_type) {
+                    try ti.addError(.{ .inconsistent_elem_types_in_array_lit = .{ .ast_node = child_ast_idx, .expected = elem_type, .actual = child_type } });
+                }
+                if (first_elem_expr == 0)
+                    first_elem_expr = child_expr
+                else
+                    ti.ft.expressions.items[prev_elem_expr].next_sibling = child_expr;
+                prev_elem_expr = child_expr;
+            }
+        }
+
+        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        try ti.ft.expressions.append(ti.gpa, .{
+            .type_ = DkType.UNKNOWN,
+            .kind = .{ .ARRAY_LIT = .{ .elems_start = first_elem_expr } },
+        });
+        return .{ .expr_idx = expr_idx, .shape = shape, .elem_type = elem_type };
+    }
+
+    fn inferArrayAccess(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+        const node = ti.ast.get(ast_idx);
+        assert(node.tag == .ARRAY_ACCESS);
+
+        const base_ast_idx = node.first_child;
+        assert(base_ast_idx != 0);
+        const index_args_ast_idx = ti.ast.get(base_ast_idx).next_sibling;
+        assert(index_args_ast_idx != 0);
+
+        const base_expr = try ti.inferExpr(base_ast_idx);
+        const base_type = ti.ft.expressions.items[base_expr].type_;
+
+        if (base_type == DkType.ERROR) {
+            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
+            return expr_idx;
+        }
+        if (!base_type.isArray()) {
+            try ti.addError(.{ .symbol_is_not_array = .{ .ast_node = ast_idx, .actual = base_type } });
+            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
+            return expr_idx;
+        }
+
+        const ai = ti.ft.array_instances.items[base_type.arrayInstanceIdx()];
+        var first_idx_expr: ExpressionIndex = 0;
+        var prev_idx_expr: ExpressionIndex = 0;
+        var idx_count: u8 = 0;
+
+        const index_args_node = ti.ast.get(index_args_ast_idx);
+        var idx_iter = index_args_node.children(ti.ast);
+        while (idx_iter.nextIdx()) |idx_ast_idx| {
+            const idx_expr = try ti.inferExpr(idx_ast_idx);
+            const idx_type = ti.ft.expressions.items[idx_expr].type_;
+            try ti.expectType(idx_ast_idx, idx_type, DkType.INT);
+            if (first_idx_expr == 0)
+                first_idx_expr = idx_expr
+            else
+                ti.ft.expressions.items[prev_idx_expr].next_sibling = idx_expr;
+            prev_idx_expr = idx_expr;
+            idx_count += 1;
+        }
+
+        if (idx_count != ai.ndim)
+            try ti.addError(.{ .wrong_num_fun_args = .{ .ast_node = ast_idx, .expected = ai.ndim, .actual = idx_count } });
+
+        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        try ti.ft.expressions.append(ti.gpa, .{
+            .type_ = ai.elem_type,
+            .kind = .{ .ARRAY_ACCESS = .{ .base = base_expr, .indices_start = first_idx_expr } },
+        });
+        return expr_idx;
+    }
+
     fn inferDecl(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StamentIndex {
         const node = ti.ast.get(ast_idx);
         assert(node.tag == .DECLARATION);
@@ -605,32 +918,120 @@ const TypeInferer = struct {
         assert(first_child_idx != 0);
         const first_child = ti.ast.get(first_child_idx);
 
-        // Skip TYPE annotation node if present
         var rhs_ast_idx: AstNodeIndex = undefined;
+        var type_decl_idx: DeclIndex = .NONE;
+        var has_array_annotation = false;
         if (first_child.tag == .TYPE) {
             rhs_ast_idx = first_child.next_sibling;
+            type_decl_idx = ti.di.name_resolution[first_child_idx];
+            if (first_child.first_child != 0 and ti.ast.get(first_child.first_child).tag == .ARRAY_SHAPE)
+                has_array_annotation = true;
         } else {
             rhs_ast_idx = first_child_idx;
         }
 
-        const rhs_expr = try ti.inferExpr(rhs_ast_idx);
-        const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
+        const is_array_lit_rhs = ti.ast.get(rhs_ast_idx).tag == .ARRAY_LIT;
+
+        var var_type: DkType = DkType.UNKNOWN;
+        var rhs_expr: ExpressionIndex = 0;
+
+        if (has_array_annotation and is_array_lit_rhs) {
+            if (ti.resolveArrayAnnotation(first_child_idx)) |ann| {
+                const lit_result = try ti.inferArrayLit(rhs_ast_idx);
+                rhs_expr = lit_result.expr_idx;
+                const shape = lit_result.shape;
+                if (shape.ndim != ann.ndim) {
+                    try ti.addError(.{ .array_shape_mismatch = .{ .ast_node = rhs_ast_idx, .expected = ann.ndim, .actual = shape.ndim } });
+                    var_type = DkType.ERROR;
+                } else {
+                    var final_shape: [ft_ast.MAX_ARRAY_NDIM]u16 = .{0} ** ft_ast.MAX_ARRAY_NDIM;
+                    var shape_ok = true;
+                    for (0..ann.ndim) |i| {
+                        if (ann.dims[i]) |concrete| {
+                            if (shape.dims[i].has_fill) {
+                                if (shape.dims[i].count > concrete) {
+                                    try ti.addError(.{ .array_shape_mismatch = .{ .ast_node = rhs_ast_idx, .expected = concrete, .actual = shape.dims[i].count } });
+                                    shape_ok = false;
+                                }
+                            } else if (shape.dims[i].count != concrete) {
+                                try ti.addError(.{ .array_shape_mismatch = .{ .ast_node = rhs_ast_idx, .expected = concrete, .actual = shape.dims[i].count } });
+                                shape_ok = false;
+                            }
+                            final_shape[i] = concrete;
+                        } else {
+                            if (shape.dims[i].has_fill) {
+                                try ti.addError(.{ .cannot_infer_array_size = rhs_ast_idx });
+                                shape_ok = false;
+                            }
+                            final_shape[i] = shape.dims[i].count;
+                        }
+                    }
+                    if (shape_ok) {
+                        const array_type = try ti.getOrCreateArrayInstance(final_shape[0..ann.ndim], ann.elem_type);
+                        try ti.setArrayExprType(rhs_expr, array_type);
+                        var_type = array_type;
+                    } else {
+                        var_type = DkType.ERROR;
+                    }
+                }
+            } else {
+                // struct array annotation or unresolvable — fall through to plain inferExpr
+                rhs_expr = try ti.inferExpr(rhs_ast_idx);
+                var_type = ti.ft.expressions.items[rhs_expr].type_;
+            }
+        } else if (!has_array_annotation and is_array_lit_rhs) {
+            const lit_result = try ti.inferArrayLit(rhs_ast_idx);
+            rhs_expr = lit_result.expr_idx;
+            const shape = lit_result.shape;
+            const elem_type = lit_result.elem_type;
+            var shape_ok = true;
+            for (0..shape.ndim) |i| {
+                if (shape.dims[i].has_fill) {
+                    try ti.addError(.{ .cannot_infer_array_size = rhs_ast_idx });
+                    shape_ok = false;
+                    break;
+                }
+            }
+            if (shape_ok) {
+                var shape_counts: [ft_ast.MAX_ARRAY_NDIM]u16 = .{0} ** ft_ast.MAX_ARRAY_NDIM;
+                for (0..shape.ndim) |i|
+                    shape_counts[i] = shape.dims[i].count;
+                const array_type = try ti.getOrCreateArrayInstance(shape_counts[0..shape.ndim], elem_type);
+                try ti.setArrayExprType(rhs_expr, array_type);
+                var_type = array_type;
+            } else {
+                var_type = DkType.ERROR;
+            }
+        } else {
+            rhs_expr = try ti.inferExpr(rhs_ast_idx);
+            const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
+            var_type = rhs_type;
+            if (type_decl_idx != .NONE) {
+                if (dkTypeFromBuiltinDecl(type_decl_idx)) |annotation_type| {
+                    var_type = annotation_type;
+                    if (rhs_type != annotation_type and rhs_type != DkType.ERROR)
+                        try ti.addError(.{ .type_mismatch = .{ .ast_node = rhs_ast_idx, .lhs = annotation_type, .rhs = rhs_type } });
+                } else if (!has_array_annotation) {
+                    const decl = ti.di.declarations.items[@intFromEnum(type_decl_idx)];
+                    if (decl.kind == .STRUCT)
+                        try ti.checkStructAnnotation(rhs_ast_idx, type_decl_idx, rhs_type);
+                }
+            }
+        }
 
         const var_name = try ti.ft.arena.allocator().dupe(u8, ti.tokens[node.token_index].str(ti.source));
 
         const var_decl_idx: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         try ti.ft.var_decls.append(ti.gpa, .{
             .name = var_name,
-            .type_ = rhs_type,
+            .type_ = var_type,
             .kind = .VAR,
             .parent_scope = parent_scope,
         });
 
-        // Prepend to scope's decl list
         ti.ft.var_decls.items[var_decl_idx].next_sibling = ti.ft.scopes.items[parent_scope].first_decl;
         ti.ft.scopes.items[parent_scope].first_decl = var_decl_idx;
 
-        // Register in decl_map
         const decl_idx = ti.di.name_resolution[ast_idx];
         if (decl_idx != .NONE)
             try ti.decl_map.put(ti.gpa, decl_idx, var_decl_idx);
@@ -673,9 +1074,9 @@ const TypeInferer = struct {
             const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
 
             // Update result type
-            if (ti.ft.var_decls.items[var_decl_idx].type_ == .UNKNOWN) {
+            if (ti.ft.var_decls.items[var_decl_idx].type_ == DkType.UNKNOWN) {
                 ti.ft.var_decls.items[var_decl_idx].type_ = rhs_type;
-            } else if (ti.ft.var_decls.items[var_decl_idx].type_ != rhs_type and rhs_type != .ERROR) {
+            } else if (ti.ft.var_decls.items[var_decl_idx].type_ != rhs_type and rhs_type != DkType.ERROR) {
                 try ti.addError(.{ .result_type_mismatch = .{ .ast_node = ast_idx, .lhs = ti.ft.var_decls.items[var_decl_idx].type_, .rhs = rhs_type } });
             }
 
@@ -698,16 +1099,16 @@ const TypeInferer = struct {
         const rhs_expr = rhs_type[0];
         const rhs_t = rhs_type[1];
 
-        if (rhs_t != .ERROR and lhs_type != .ERROR) {
+        if (rhs_t != DkType.ERROR and lhs_type != DkType.ERROR) {
             switch (assign_kind) {
                 .ASSIGN => {
                     if (lhs_type != rhs_t)
                         try ti.addError(.{ .type_mismatch = .{ .ast_node = ast_idx, .lhs = lhs_type, .rhs = rhs_t } });
                 },
                 .PLUS, .MINUS, .MULT, .DIV => {
-                    if (lhs_type != .INT and lhs_type != .FLOAT)
+                    if (lhs_type != DkType.INT and lhs_type != DkType.FLOAT)
                         try ti.addError(.{ .wrong_type = .{ .ast_node = lhs_ast_idx, .actual = lhs_type, .expected = "LHS must be of number type" } });
-                    if (rhs_t != .INT and rhs_t != .FLOAT)
+                    if (rhs_t != DkType.INT and rhs_t != DkType.FLOAT)
                         try ti.addError(.{ .wrong_type = .{ .ast_node = rhs_ast_idx, .actual = rhs_t, .expected = "RHS must be of number type" } });
                     if (lhs_type != rhs_t)
                         try ti.addError(.{ .type_mismatch = .{ .ast_node = ast_idx, .lhs = lhs_type, .rhs = rhs_t } });
@@ -780,7 +1181,7 @@ const TypeInferer = struct {
 
         const cond_expr = try ti.inferExpr(cte.cond_idx);
         const cond_type = ti.ft.expressions.items[cond_expr].type_;
-        try ti.expectType(cte.cond_idx, cond_type, .BOOL);
+        try ti.expectType(cte.cond_idx, cond_type, DkType.BOOL);
 
         const then_scope = try ti.inferBlock(cte.then_idx, .IF, parent_scope);
         const else_scope: ScopeIndex = if (cte.else_idx != 0)
@@ -806,7 +1207,7 @@ const TypeInferer = struct {
 
         const cond_expr = try ti.inferExpr(cond_idx);
         const cond_type = ti.ft.expressions.items[cond_expr].type_;
-        try ti.expectType(cond_idx, cond_type, .BOOL);
+        try ti.expectType(cond_idx, cond_type, DkType.BOOL);
 
         const body_scope = try ti.inferBlock(body_ast_idx, .WHILE, parent_scope);
 
@@ -842,6 +1243,7 @@ const TypeInferer = struct {
             .UNARY_OP => ti.inferUnaryOp(ast_idx),
             .CALL_OR_INST => ti.inferCallOrInst(ast_idx),
             .MEMBER_ACCESS => ti.inferMemberAccess(ast_idx),
+            .ARRAY_ACCESS => ti.inferArrayAccess(ast_idx),
             else => unreachable,
         };
     }
@@ -855,26 +1257,26 @@ const TypeInferer = struct {
             .INT_LIT => {
                 const val = std.fmt.parseInt(i64, token.str(ti.source), 10) catch unreachable;
                 try ti.ft.expressions.append(ti.gpa, .{
-                    .type_ = .INT,
+                    .type_ = DkType.INT,
                     .kind = .{ .LITERAL = .{ .int = val } },
                 });
             },
             .FLOAT_LIT => {
                 const val = std.fmt.parseFloat(f64, token.str(ti.source)) catch unreachable;
                 try ti.ft.expressions.append(ti.gpa, .{
-                    .type_ = .FLOAT,
+                    .type_ = DkType.FLOAT,
                     .kind = .{ .LITERAL = .{ .float = val } },
                 });
             },
             .TRUE => {
                 try ti.ft.expressions.append(ti.gpa, .{
-                    .type_ = .BOOL,
+                    .type_ = DkType.BOOL,
                     .kind = .{ .LITERAL = .{ .boolean = true } },
                 });
             },
             .FALSE => {
                 try ti.ft.expressions.append(ti.gpa, .{
-                    .type_ = .BOOL,
+                    .type_ = DkType.BOOL,
                     .kind = .{ .LITERAL = .{ .boolean = false } },
                 });
             },
@@ -927,22 +1329,22 @@ const TypeInferer = struct {
         };
 
         // Type checking
-        var result_type: DkType = .ERROR;
-        if (lhs_type != .ERROR and rhs_type != .ERROR) {
+        var result_type: DkType = DkType.ERROR;
+        if (lhs_type != DkType.ERROR and rhs_type != DkType.ERROR) {
             switch (token.tag) {
                 .EQ, .NOT_EQ, .LT, .LE, .GT, .GE => {
-                    if (lhs_type != rhs_type or lhs_type == .UNKNOWN)
+                    if (lhs_type != rhs_type or lhs_type == DkType.UNKNOWN)
                         try ti.addError(.{ .type_mismatch = .{ .ast_node = ast_idx, .lhs = lhs_type, .rhs = rhs_type } })
                     else
-                        result_type = .BOOL;
+                        result_type = DkType.BOOL;
                 },
                 .PLUS, .MINUS, .TIMES, .DIV, .POW => {
                     var err = false;
-                    if (lhs_type != .INT and lhs_type != .FLOAT) {
+                    if (lhs_type != DkType.INT and lhs_type != DkType.FLOAT) {
                         try ti.addError(.{ .wrong_type = .{ .ast_node = lhs_ast_idx, .actual = lhs_type, .expected = "LHS must be of number type" } });
                         err = true;
                     }
-                    if (rhs_type != .INT and rhs_type != .FLOAT) {
+                    if (rhs_type != DkType.INT and rhs_type != DkType.FLOAT) {
                         try ti.addError(.{ .wrong_type = .{ .ast_node = rhs_ast_idx, .actual = rhs_type, .expected = "RHS must be of number type" } });
                         err = true;
                     }
@@ -955,16 +1357,16 @@ const TypeInferer = struct {
                 },
                 .AND, .OR, .XOR => {
                     var err = false;
-                    if (lhs_type != .BOOL) {
+                    if (lhs_type != DkType.BOOL) {
                         try ti.addError(.{ .wrong_type = .{ .ast_node = lhs_ast_idx, .actual = lhs_type, .expected = "LHS must be a boolean" } });
                         err = true;
                     }
-                    if (rhs_type != .BOOL) {
+                    if (rhs_type != DkType.BOOL) {
                         try ti.addError(.{ .wrong_type = .{ .ast_node = rhs_ast_idx, .actual = rhs_type, .expected = "RHS must be a boolean" } });
                         err = true;
                     }
                     if (!err)
-                        result_type = .BOOL;
+                        result_type = DkType.BOOL;
                 },
                 else => unreachable,
             }
@@ -991,17 +1393,17 @@ const TypeInferer = struct {
             else => unreachable,
         };
 
-        var result_type: DkType = .ERROR;
-        if (operand_type != .ERROR) {
+        var result_type: DkType = DkType.ERROR;
+        if (operand_type != DkType.ERROR) {
             switch (token.tag) {
                 .NOT => {
-                    if (operand_type != .BOOL)
+                    if (operand_type != DkType.BOOL)
                         try ti.addError(.{ .wrong_type = .{ .ast_node = node.first_child, .actual = operand_type, .expected = "Child expression must be a boolean" } })
                     else
-                        result_type = .BOOL;
+                        result_type = DkType.BOOL;
                 },
                 .MINUS => {
-                    if (operand_type != .INT and operand_type != .FLOAT)
+                    if (operand_type != DkType.INT and operand_type != DkType.FLOAT)
                         try ti.addError(.{ .wrong_type = .{ .ast_node = node.first_child, .actual = operand_type, .expected = "Child expression must be a number" } })
                     else
                         result_type = operand_type;
@@ -1026,7 +1428,7 @@ const TypeInferer = struct {
         if (decl_idx == .NONE) {
             // Unknown — error was already reported in name resolution
             const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-            try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
@@ -1038,7 +1440,7 @@ const TypeInferer = struct {
             else => {
                 // symbol is not callable — error was already reported in name resolution
                 const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-                try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+                try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
                 return expr_idx;
             },
         }
@@ -1052,7 +1454,7 @@ const TypeInferer = struct {
 
     fn resolveArgs(ti: *TypeInferer, ast_idx: AstNodeIndex, params: []const nr.ParamOrMember, param_count: u8) !ResolvedArgs {
         var result = ResolvedArgs{
-            .types = .{.UNKNOWN} ** MAX_NUM_FUNCTION_PARAMS,
+            .types = .{DkType.UNKNOWN} ** MAX_NUM_FUNCTION_PARAMS,
             .exprs = .{0} ** MAX_NUM_FUNCTION_PARAMS,
             .count = param_count,
         };
@@ -1150,7 +1552,7 @@ const TypeInferer = struct {
         const return_type = ti.instantiateFunction(ast_idx, ft_idx, arg_types) catch |err| switch (err) {
             error.WrongNumberOfFunctionArguments => {
                 const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-                try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+                try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
                 return expr_idx;
             },
             error.OutOfMemory => return error.OutOfMemory,
@@ -1218,16 +1620,16 @@ const TypeInferer = struct {
         const base_expr = try ti.inferExpr(node.first_child);
         const base_type = ti.ft.expressions.items[base_expr].type_;
 
-        if (base_type == .ERROR) {
+        if (base_type == DkType.ERROR) {
             const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-            try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
         if (!base_type.isStruct()) {
             try ti.addError(.{ .member_access_on_non_struct = .{ .ast_node = ast_idx, .actual = base_type } });
             const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-            try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
@@ -1248,7 +1650,7 @@ const TypeInferer = struct {
         if (member_idx == null) {
             try ti.addError(.{ .unknown_field = .{ .ast_node = ast_idx, .field_name = node.token_index } });
             const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
-            try ti.ft.expressions.append(ti.gpa, .{ .type_ = .ERROR });
+            try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
@@ -1554,4 +1956,213 @@ test "supply wrong type to fn param with default" {
 
     try std.testing.expect(err != null);
     try std.testing.expect(err.?.error_.wrong_type.actual == DkType.BOOL); // error is on the call site
+}
+
+// -----------------------------------------------------------------------
+// arrayShapeFromLit unit tests
+// -----------------------------------------------------------------------
+
+fn parseExprForShapeTest(source: []const u8, gpa: std.mem.Allocator) !struct { ast: par.AST, root: par.AstNodeIndex } {
+    var ts = try tok.TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+    var p = try par.Parser.init(source, ts.tokens, gpa);
+    const root = try p.parseExpression();
+    return .{ .ast = p.ast, .root = root };
+}
+
+test "arrayShapeFromLit: flat [1,2,3]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[1,2,3]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 1), shape.ndim);
+    try std.testing.expectEqual(@as(u16, 3), shape.dims[0].count);
+    try std.testing.expect(!shape.dims[0].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: fill in middle [1,0...,2]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[1,0...,2]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 1), shape.ndim);
+    try std.testing.expectEqual(@as(u16, 2), shape.dims[0].count);
+    try std.testing.expect(shape.dims[0].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: only fill [0...]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[0...]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 1), shape.ndim);
+    try std.testing.expectEqual(@as(u16, 0), shape.dims[0].count);
+    try std.testing.expect(shape.dims[0].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: 2D [[1,2],[3,4]]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[[1,2],[3,4]]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 2), shape.ndim);
+    try std.testing.expectEqual(@as(u16, 2), shape.dims[0].count);
+    try std.testing.expect(!shape.dims[0].has_fill);
+    try std.testing.expectEqual(@as(u16, 2), shape.dims[1].count);
+    try std.testing.expect(!shape.dims[1].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: 2D with fill row [[1,2,3],[0...]...]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[[1,2,3],[0...]...]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 2), shape.ndim);
+    try std.testing.expectEqual(@as(u16, 1), shape.dims[0].count);
+    try std.testing.expect(shape.dims[0].has_fill);
+    try std.testing.expectEqual(@as(u16, 3), shape.dims[1].count);
+    try std.testing.expect(!shape.dims[1].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: 2D all fills [[0...]...]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[[0...]...]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expectEqual(@as(u8, 2), shape.ndim);
+    try std.testing.expect(shape.dims[0].has_fill);
+    try std.testing.expect(shape.dims[1].has_fill);
+    try std.testing.expectEqual(@as(par.AstNodeIndex, 0), shape.extra_fill_node);
+}
+
+test "arrayShapeFromLit: multiple fills same level [1,0...,2,0...]" {
+    const gpa = std.testing.allocator;
+    var result = try parseExprForShapeTest("[1,0...,2,0...]", gpa);
+    defer result.ast.deinit();
+    const shape = arrayShapeFromLit(&result.ast, result.root);
+    try std.testing.expect(shape.extra_fill_node != 0);
+}
+
+// -----------------------------------------------------------------------
+// Full pipeline array type inference tests
+// -----------------------------------------------------------------------
+
+fn inferProgram(source: []const u8, gpa: std.mem.Allocator) !ft_ast.FtAst {
+    var ts = try tok.TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+    return infer(gpa, ts, &pr.ast, &di);
+}
+
+test "array: annotated [3]Int = [1,2,3]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2,3]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(!ft.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
+    const ai = ft.array_instances.items[0];
+    try std.testing.expectEqual(@as(u8, 1), ai.ndim);
+    try std.testing.expectEqual(@as(u16, 3), ai.shape[0]);
+    try std.testing.expectEqual(DkType.INT, ai.elem_type);
+    // var decl should have array type
+    const main_scope = ft.fn_decls.items[1].body_scope;
+    const var_decl_idx = ft.scopes.items[main_scope].first_decl;
+    try std.testing.expect(ft.var_decls.items[var_decl_idx].type_.isArray());
+}
+
+test "array: inferred := [1,2,3]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a := [1,2,3]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(!ft.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
+    const ai = ft.array_instances.items[0];
+    try std.testing.expectEqual(@as(u8, 1), ai.ndim);
+    try std.testing.expectEqual(@as(u16, 3), ai.shape[0]);
+    try std.testing.expectEqual(DkType.INT, ai.elem_type);
+}
+
+test "array: 2D annotated [2,3]Int" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2,3],[4,5,6]]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(!ft.hasErrors());
+    // expect 2 array instances: [3]Int (inner) and [2,3]Int (outer)
+    var found_outer = false;
+    for (ft.array_instances.items) |ai| {
+        if (ai.ndim == 2 and ai.shape[0] == 2 and ai.shape[1] == 3 and ai.elem_type == DkType.INT)
+            found_outer = true;
+    }
+    try std.testing.expect(found_outer);
+}
+
+test "array: fill with annotation [4]Int = [1,0...,2]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [4]Int = [1,0...,2]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(!ft.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
+    try std.testing.expectEqual(@as(u16, 4), ft.array_instances.items[0].shape[0]);
+}
+
+test "array: shape mismatch [3]Int = [1,2]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    try std.testing.expect(ft.errors.items[0].error_ == .array_shape_mismatch);
+}
+
+test "array: cannot infer size with fill" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a := [1,0...]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    try std.testing.expect(ft.errors.items[0].error_ == .cannot_infer_array_size);
+}
+
+test "array: multiple fills same level" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,0...,2,0...]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    var found = false;
+    for (ft.errors.items) |e| if (e.error_ == .multiple_fills_in_array_literal) { found = true; break; };
+    try std.testing.expect(found);
+}
+
+test "array: inconsistent elem types [1,2,true]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2,true]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    var found = false;
+    for (ft.errors.items) |e| if (e.error_ == .inconsistent_elem_types_in_array_lit) { found = true; break; };
+    try std.testing.expect(found);
+}
+
+test "array: ndim mismatch [3]Int = [[1,2,3]]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [3]Int = [[1,2,3]]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    try std.testing.expect(ft.errors.items[0].error_ == .array_shape_mismatch);
+}
+
+test "array: inconsistent inner dim [[1,2],[1,2,3]]" {
+    const gpa = std.testing.allocator;
+    var ft = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2],[1,2,3]]", gpa);
+    defer ft.deinit();
+    try std.testing.expect(ft.hasErrors());
+    var found = false;
+    for (ft.errors.items) |e| if (e.error_ == .inconsistent_inner_dim) { found = true; break; };
+    try std.testing.expect(found);
 }

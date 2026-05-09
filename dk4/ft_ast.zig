@@ -6,45 +6,76 @@ const par = @import("parser.zig");
 const TokenIndex = tok.TokenStream.TokenIndex;
 const AstNodeIndex = par.AstNodeIndex;
 
-pub const DkType = enum(u16) {
-    UNKNOWN = 0,
-    VOID,
-    BOOL,
-    INT,
-    FLOAT,
-    ANY,
-    ERROR,
-    _,
+pub const DkType = packed struct(u32) {
+    kind: Kind,
+    index: u24,
 
-    const FIRST_STRUCT: u16 = @intFromEnum(DkType.ERROR) + 1;
+    pub const Kind = enum(u8) {
+        UNKNOWN = 0,
+        ERROR,
+        VOID,
+        SCALAR,
+        STRUCT,
+        ARRAY,
+    };
 
-    pub fn isStruct(self: DkType) bool {
-        return @intFromEnum(self) >= FIRST_STRUCT;
-    }
+    pub const ScalarType = enum(u8) {
+        BOOL,
+        INT,
+        FLOAT,
+        ANY,
+    };
 
-    pub fn structInstanceIdx(self: DkType) StructInstanceIndex {
-        return @intCast(@intFromEnum(self) - FIRST_STRUCT);
-    }
+    pub const UNKNOWN: DkType = .{ .kind = .UNKNOWN, .index = 0 };
+    pub const ERROR:   DkType = .{ .kind = .ERROR,   .index = 0 };
+    pub const VOID:    DkType = .{ .kind = .VOID,    .index = 0 };
+    pub const BOOL:    DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.BOOL) };
+    pub const INT:     DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.INT) };
+    pub const FLOAT:   DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.FLOAT) };
+    pub const ANY:     DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.ANY) };
+
+    pub fn isScalar(self: DkType) bool { return self.kind == .SCALAR; }
+    pub fn isStruct(self: DkType) bool { return self.kind == .STRUCT; }
+    pub fn isArray(self: DkType)  bool { return self.kind == .ARRAY; }
+
+    pub fn scalar(self: DkType) ScalarType { return @enumFromInt(self.index); }
+    pub fn structInstanceIdx(self: DkType) StructInstanceIndex { return @intCast(self.index); }
+    pub fn arrayInstanceIdx(self: DkType)  ArrayInstanceIndex  { return @intCast(self.index); }
 
     pub fn fromStructInstance(idx: StructInstanceIndex) DkType {
-        return @enumFromInt(@as(u16, @intCast(idx)) + FIRST_STRUCT);
+        return .{ .kind = .STRUCT, .index = idx };
+    }
+    pub fn fromArrayInstance(idx: ArrayInstanceIndex) DkType {
+        return .{ .kind = .ARRAY, .index = idx };
     }
 
-    pub fn langName(self: DkType) []const u8 {
-        return switch (self) {
+    pub fn langName(self: DkType) [:0]const u8 {
+        return switch (self.kind) {
             .UNKNOWN => "Unknown",
-            .VOID => "Void",
-            .BOOL => "Bool",
-            .INT => "Int",
-            .FLOAT => "Float",
-            .ANY => "Any",
-            .ERROR => "Error",
-            _ => "Struct", // caller should use StructDecl.name for struct types
+            .ERROR   => "Error",
+            .VOID    => "Void",
+            .SCALAR  => switch (self.scalar()) {
+                .BOOL  => "Bool",
+                .INT   => "Int",
+                .FLOAT => "Float",
+                .ANY   => "Any",
+            },
+            .STRUCT => "Struct",
+            .ARRAY  => "Array",
         };
     }
 };
 
-pub const StructInstanceIndex = u16;
+pub const StructInstanceIndex = u24;
+pub const ArrayInstanceIndex = u24;
+
+pub const MAX_ARRAY_NDIM: u8 = 8;
+
+pub const ArrayInstance = struct {
+    elem_type: DkType,
+    ndim: u8,
+    shape: [MAX_ARRAY_NDIM]u16,
+};
 
 pub const BinaryOp = enum {
     ADD,
@@ -98,7 +129,7 @@ pub const Scope = struct {
 
 pub const VarDecl = struct {
     name: []const u8 = "", // arena allocated
-    type_: DkType = .UNKNOWN,
+    type_: DkType = DkType.UNKNOWN,
     kind: enum(u8) { VAR, RESULT, FN_PARAM } = .VAR,
     parent_scope: ScopeIndex = 0,
     next_sibling: VarDeclIndex = 0,
@@ -106,7 +137,7 @@ pub const VarDecl = struct {
 
 pub const FnDecl = struct {
     name: []const u8 = "", // arena allocated
-    return_type: DkType = .UNKNOWN,
+    return_type: DkType = DkType.UNKNOWN,
     params: IndexRange(VarDeclIndex) = .{},
     body_scope: ScopeIndex = 0,
 };
@@ -118,7 +149,7 @@ pub const StructDecl = struct {
 };
 
 pub const Expression = struct {
-    type_: DkType = .UNKNOWN,
+    type_: DkType = DkType.UNKNOWN,
     next_sibling: ExpressionIndex = 0,
     kind: union(enum) {
         INVALID: void,
@@ -149,6 +180,17 @@ pub const Expression = struct {
         MEMBER_ACCESS: struct {
             base: ExpressionIndex,
             member_idx: u8,
+        },
+        ARRAY_LIT: struct {
+            elems_start: ExpressionIndex, // linked list (regular exprs + FILL nodes, in order)
+        },
+        FILL: struct {
+            value: ExpressionIndex,
+            // fill_count = array_instances[type_.arrayInstanceIdx()].shape[dim] - explicit sibling count
+        },
+        ARRAY_ACCESS: struct {
+            base: ExpressionIndex,
+            indices_start: ExpressionIndex, // linked list, count must equal base type ndim
         },
     } = .INVALID,
 };
@@ -241,6 +283,27 @@ pub const TypeError = union(enum) {
         ast_node: AstNodeIndex,
         field_name: TokenIndex,
     },
+    multiple_fills_in_array_literal: AstNodeIndex,
+    array_shape_mismatch: struct {
+        ast_node: AstNodeIndex,
+        expected: u16,
+        actual: u16,
+    },
+    cannot_infer_array_size: AstNodeIndex,
+    inconsistent_inner_dim: struct {
+        ast_node: AstNodeIndex,
+        expected: u16,
+        actual: u16,
+    },
+    inconsistent_elem_types_in_array_lit: struct {
+        ast_node: AstNodeIndex,
+        expected: DkType,
+        actual: DkType,
+    },
+    symbol_is_not_array: struct {
+        ast_node: AstNodeIndex,
+        actual: DkType,
+    },
 };
 
 pub const TypeErrorInfo = struct {
@@ -258,13 +321,14 @@ pub const TypeErrorInfo = struct {
 
 pub const FtAst = struct {
     // zig fmt: off
-    fn_decls:     std.ArrayList(FnDecl),
-    struct_decls: std.ArrayList(StructDecl),
-    scopes:       std.ArrayList(Scope),
-    var_decls:    std.ArrayList(VarDecl),
-    statements:   std.ArrayList(Statement),
-    expressions:  std.ArrayList(Expression),
-    errors:       std.ArrayList(TypeErrorInfo),
+    fn_decls:        std.ArrayList(FnDecl),
+    struct_decls:    std.ArrayList(StructDecl),
+    array_instances: std.ArrayList(ArrayInstance),
+    scopes:          std.ArrayList(Scope),
+    var_decls:       std.ArrayList(VarDecl),
+    statements:      std.ArrayList(Statement),
+    expressions:     std.ArrayList(Expression),
+    errors:          std.ArrayList(TypeErrorInfo),
 
     gpa:   std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -277,13 +341,14 @@ pub const FtAst = struct {
         var res = FtAst{
             .gpa = gpa,
             .arena = .init(gpa),
-            .scopes      = try .initCapacity(gpa, 1024),
-            .fn_decls    = try .initCapacity(gpa, 256),
-            .struct_decls = try .initCapacity(gpa, 64),
-            .var_decls   = try .initCapacity(gpa, 1024),
-            .statements  = try .initCapacity(gpa, 1024),
-            .expressions = try .initCapacity(gpa, 1024),
-            .errors      = try .initCapacity(gpa, 8),
+            .scopes          = try .initCapacity(gpa, 1024),
+            .fn_decls        = try .initCapacity(gpa, 256),
+            .struct_decls    = try .initCapacity(gpa, 64),
+            .array_instances = try .initCapacity(gpa, 32),
+            .var_decls       = try .initCapacity(gpa, 1024),
+            .statements      = try .initCapacity(gpa, 1024),
+            .expressions     = try .initCapacity(gpa, 1024),
+            .errors          = try .initCapacity(gpa, 8),
         };
 
         res.scopes     .appendAssumeCapacity(.{}); // reserve index 0 for invalid scope
@@ -302,13 +367,14 @@ pub const FtAst = struct {
 
     pub fn deinit(self: *FtAst) void {
         // zig fmt: off
-        self.scopes      .deinit(self.gpa);
-        self.fn_decls    .deinit(self.gpa);
-        self.struct_decls.deinit(self.gpa);
-        self.var_decls   .deinit(self.gpa);
-        self.statements  .deinit(self.gpa);
-        self.expressions .deinit(self.gpa);
-        self.errors      .deinit(self.gpa);
+        self.scopes          .deinit(self.gpa);
+        self.fn_decls        .deinit(self.gpa);
+        self.struct_decls    .deinit(self.gpa);
+        self.array_instances .deinit(self.gpa);
+        self.var_decls       .deinit(self.gpa);
+        self.statements      .deinit(self.gpa);
+        self.expressions     .deinit(self.gpa);
+        self.errors          .deinit(self.gpa);
         // zig fmt: on
         self.arena.deinit();
     }
