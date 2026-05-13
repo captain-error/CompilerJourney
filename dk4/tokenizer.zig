@@ -60,6 +60,8 @@ pub const Token = struct {
         PLUSASSIGN,
         MINUSASSIGN,
 
+        UNDERSCORE,
+
         IF,
         ELSE,
         WHILE,
@@ -228,7 +230,6 @@ pub const Tokenizer = struct {
                 }
                 return t.emit(.COMMENT, tail.len);
             },
-
             '\n' => {
                 t.at_line_start = true;
                 return t.emit(.EOL, 1);
@@ -330,6 +331,7 @@ pub const Tokenizer = struct {
             const word = tail[0..len];
             // FIXME: this can be done without revisiting
             // zig fmt: off
+            if (std.mem.eql(u8, "_"     , word)) return t.emit(.UNDERSCORE, len);
             if (std.mem.eql(u8, "or"    , word)) return t.emit(.OR        , len);
             if (std.mem.eql(u8, "if"    , word)) return t.emit(.IF        , len);
             if (std.mem.eql(u8, "fn"    , word)) return t.emit(.FN        , len);

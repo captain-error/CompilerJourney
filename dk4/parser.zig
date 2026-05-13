@@ -298,28 +298,6 @@ pub const Parser = struct {
         }
     }
 
-    // fn parseAtom(p: *Parser) InternalParserError!AstNodeIndex {
-    //     // std.debug.print("parseAtom: start: {s}\n", .{@tagName(p.peek(0).tag)});
-
-    //     if (!try p.expectOneOf(
-    //         .{
-    //             .FLOAT_LIT,
-    //             .INT_LIT,
-    //             .TRUE,
-    //             .FALSE,
-    //             .IDENTIFIER,
-    //         },
-    //         "literal or variable",
-    //     )) return error.UnexpectedToken;
-
-    //     const idx = p.token_idx;
-    //     p.next();
-
-    //     return p.addNode(.{
-    //         .token_index = idx,
-    //         .tag = .ATOM,
-    //     });
-    // }
 
     pub fn parseFnDecl(p: *Parser) InternalParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .FN);
@@ -492,8 +470,7 @@ pub const Parser = struct {
         var member_list = p.ast.startList();
 
         member_loop: while (true) {
-            assert(p.peek(0).tag != .EOF);
-            // p.peek(0).tag != .END_BLOCK
+            assert(p.peek(0).tag != .EOF); // EOF should be prepended by END_BLOCK in the Tokenizer
             switch (p.peek(0).tag) {
                 .END_BLOCK => {
                     p.next();
@@ -597,18 +574,21 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             }
             const dim_idx = blk: {
-                if (p.peek(0).tag == .IDENTIFIER and
-                    std.mem.eql(u8, p.source[p.tokens[p.token_idx].start..p.tokens[p.token_idx].end()], "_"))
-                {
-                    const idx = try p.ast.append(.{ .tag = .INFER_DIM, .token_index = p.token_idx });
-                    p.next();
-                    break :blk idx;
-                } else {
-                    if (!try p.expectToken(.INT_LIT))
-                        return error.UnexpectedToken;
-                    const idx = try p.ast.append(.{ .tag = .ATOM, .token_index = p.token_idx });
-                    p.next();
-                    break :blk idx;
+                if(!try p.expectOneOf(.{ .UNDERSCORE, .INT_LIT }, "int literal or '_'"))
+                    return error.UnexpectedToken;
+
+                switch (p.peek(0).tag) {
+                    .UNDERSCORE => {
+                        const idx = try p.ast.append(.{ .tag = .INFER_DIM, .token_index = p.token_idx });
+                        p.next();
+                        break :blk idx;
+                    },
+                    .INT_LIT => {
+                        const idx = try p.ast.append(.{ .tag = .ATOM, .token_index = p.token_idx });
+                        p.next();
+                        break :blk idx;
+                    },
+                    else => unreachable,
                 }
             };
             try dim_list.appendExisting(dim_idx);
@@ -618,7 +598,7 @@ pub const Parser = struct {
         if (!try p.expectToken(.RBRACKET))
             return error.UnexpectedToken;
         p.next(); // consume ]
-
+        
         p.ast.get(shape_idx).first_child = dim_list.start_index;
 
         const type_idx = try p.parseScalarType();

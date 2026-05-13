@@ -847,7 +847,7 @@ test "parse inferred size array declaration" {
         AstNodeTag.DECLARATION, "a",
         .{ AstNodeTag.TYPE, "Int",
             .{ AstNodeTag.ARRAY_SHAPE,
-                .{ AstNodeTag.INFER_DIM, Token.Tag.IDENTIFIER, "_" },
+                .{ AstNodeTag.INFER_DIM, Token.Tag.UNDERSCORE, "_" },
             },
         },
         .{ AstNodeTag.ARRAY_LIT,
@@ -947,7 +947,7 @@ test "parse inferred 2D shape" {
         AstNodeTag.DECLARATION, "a",
         .{ AstNodeTag.TYPE, "Int",
             .{ AstNodeTag.ARRAY_SHAPE,
-                .{ AstNodeTag.INFER_DIM, "_" },
+                .{ AstNodeTag.INFER_DIM, Token.Tag.UNDERSCORE, "_" },
                 .{ AstNodeTag.INFER_DIM, "_" },
             },
         },
@@ -1049,21 +1049,23 @@ test "parse struct with array member and fill" {
 }
 
 test "parse struct with array literal member" {
+    std.debug.print("Heyho lets go!\n", .{});
     const source =
         \\struct S
-        \\    arr: [1,2,3]
+        \\    arr:= [1,2,3]
         \\
     ;
     const expected = .{
-        AstNodeTag.STRUCTDECL, "S",
-        .{ AstNodeTag.MEMBER, "arr",
-            .{ AstNodeTag.ARRAY_LIT,
-                .{ AstNodeTag.ATOM, "1" },
-                .{ AstNodeTag.ATOM, "2" },
-                .{ AstNodeTag.ATOM, "3" },
+        AstNodeTag.BLOCK, .{
+            AstNodeTag.STRUCTDECL, "S",
+            .{ AstNodeTag.MEMBER, "arr",
+                .{ AstNodeTag.ARRAY_LIT,
+                    .{ AstNodeTag.ATOM, "1" },
+                    .{ AstNodeTag.ATOM, "2" },
+                    .{ AstNodeTag.ATOM, "3" },
+                },
             },
         },
-    
     };
     try testParser(source, Parser.parse, expected, false);
 }
@@ -1250,21 +1252,7 @@ fn testParser(source: []const u8, parse_func: anytype, expected_structure: anyty
 
         return err;
     };
-    if (ts.tokens[parser.token_idx].tag != .EOF) {
-        try stdout.writeAll("All tokens:\n");
-        try ts.prettyPrintTokens(stdout);
-        try stdout.writeAll("-----------------------\n\n");
-
-        try stdout.writeAll("AST:\n");
-        try parser.printAstBranch(stdout, ast_idx, 1);
-
-        try stdout.print("\nNOT ALL TOKENS USED.\nunused tokens:\n", .{});
-        for (ts.tokens[parser.token_idx..]) |t|
-            try stdout.print("{s}[{s}] ", .{ @tagName(t.tag), t.str(source) });
-        try stdout.print("\n\n", .{});
-        testAstStructure(&parser.ast);
-        return error.NotAllTokensUsed;
-    }
+    
 
     if (ast_idx == 0 or parser.hasErrors() or print_always) {
         try stdout.writeAll("All tokens:\n");
@@ -1288,6 +1276,22 @@ fn testParser(source: []const u8, parse_func: anytype, expected_structure: anyty
             try parser.printErrors(stdout, ts);
             return error.ParserReportedErrors;
         }
+    }
+
+    if (ts.tokens[parser.token_idx].tag != .EOF) {
+        try stdout.writeAll("All tokens:\n");
+        try ts.prettyPrintTokens(stdout);
+        try stdout.writeAll("-----------------------\n\n");
+
+        try stdout.writeAll("AST:\n");
+        try parser.printAstBranch(stdout, ast_idx, 1);
+
+        try stdout.print("\nNOT ALL TOKENS USED.\nunused tokens:\n", .{});
+        for (ts.tokens[parser.token_idx..]) |t|
+            try stdout.print("{s}[{s}] ", .{ @tagName(t.tag), t.str(source) });
+        try stdout.print("\n\n", .{});
+        testAstStructure(&parser.ast);
+        return error.NotAllTokensUsed;
     }
 
     // testAstStructure(&parser.ast);
