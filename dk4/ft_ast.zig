@@ -204,13 +204,8 @@ pub const Statement = struct {
             rhs: ExpressionIndex,
         },
         ASSIGNMENT: struct {
-            var_decl_idx: VarDeclIndex,
-            type_: DkType,
+            lhs: ExpressionIndex,
             kind: AssignmentKind,
-            rhs: ExpressionIndex,
-        },
-        RESULT_ASSIGN: struct {
-            type_: DkType,
             rhs: ExpressionIndex,
         },
         IF_STMT: struct {
@@ -221,12 +216,6 @@ pub const Statement = struct {
         WHILE_LOOP: struct {
             condition: ExpressionIndex,
             body_scope: ScopeIndex = 0,
-        },
-        MEMBER_ASSIGN: struct {
-            base: ExpressionIndex,
-            member_idx: u8,
-            kind: AssignmentKind,
-            rhs: ExpressionIndex,
         },
         FN_CALL: ExpressionIndex,
     } = .INVALID,

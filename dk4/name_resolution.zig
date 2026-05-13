@@ -2,6 +2,7 @@ const std = @import("std");
 const tok = @import("tokenizer.zig");
 const par = @import("parser.zig");
 const util = @import("util.zig");
+const elab = @import("ast_elaboration.zig");
 
 const assert = std.debug.assert;
 
@@ -696,6 +697,8 @@ const Resolver = struct {
             try r.resolveAtomAsLValue(lhs_idx, lhs)
         else if (lhs.tag == .MEMBER_ACCESS)
             try r.resolveMemberAccessBase(lhs_idx)
+        else if (lhs.tag == .ARRAY_ACCESS)
+            try r.resolveArrayAccess(lhs_idx)
         else
             unreachable;
 
@@ -948,6 +951,9 @@ test "resolve simple program" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -969,6 +975,9 @@ test "resolve undeclared variable" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -992,6 +1001,9 @@ test "resolve duplicate variable" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1018,6 +1030,9 @@ test "resolve function call" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -1042,6 +1057,9 @@ test "resolve struct declaration" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1071,6 +1089,9 @@ test "resolve struct with generic member" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -1097,6 +1118,9 @@ test "resolve struct instantiation" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1135,6 +1159,9 @@ test "resolve duplicate struct member" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -1161,6 +1188,9 @@ test "resolve shadowing error" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -1181,6 +1211,9 @@ test "resolve unknown function" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1206,6 +1239,9 @@ test "resolve member access" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();

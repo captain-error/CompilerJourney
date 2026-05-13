@@ -246,19 +246,21 @@ pub const Parser = struct {
 
     fn precedenceOf(tag: Token.Tag) PrecedenceLevel {
         return switch (tag) {
-            .OR => 1,
-            .XOR => 2,
-            .AND => 3,
-            .GT, .GE, .LT, .LE => 4,
-            .PLUS, .MINUS => 5,
-            .TIMES, .DIV => 6,
-            .POW => 7,
+            .ASSIGN, .PLUSASSIGN, .MINUSASSIGN, .MULTASSIGN, .DIVASSIGN => 1,
+            .OR => 2,
+            .XOR => 3,
+            .AND => 4,
+            .GT, .GE, .LT, .LE => 5,
+            .PLUS, .MINUS => 6,
+            .TIMES, .DIV => 7,
+            .POW => 8,
             else => 0,
         };
     }
 
     fn isRightAssociative(tag: Token.Tag) bool {
         return switch(tag) {
+            .ASSIGN, .PLUSASSIGN, .MINUSASSIGN, .MULTASSIGN, .DIVASSIGN => true,
             .POW => true,
             else => false,
         };
@@ -435,11 +437,12 @@ pub const Parser = struct {
             });
         }
 
-        // Postfix member access chain
-        result = try p.parseMemberAccessChain(result);
-        // Postfix array access
-        if (p.peek(0).tag == .LBRACKET)
-            result = try p.parseArrayAccess(result);
+        while (p.peek(0).tag == .DOT or p.peek(0).tag == .LBRACKET) {
+            if (p.peek(0).tag == .DOT)
+                result = try p.parseMemberAccessChain(result)
+            else
+                result = try p.parseArrayAccess(result);
+        }
         return result;
     }
 
@@ -760,41 +763,6 @@ pub const Parser = struct {
         return res;
     }
 
-    /// Parse a call/inst as a statement — handles trailing `.field = rhs` or end-of-statement.
-    fn parseCallOrInstStatement(p: *Parser) InternalParserError!AstNodeIndex {
-        const call_idx = try p.parseCallOrInst();
-        // Check if this is actually a member assignment: foo(x).bar = ...
-        if (p.peek(0).tag == .DOT) {
-            const lhs = try p.parseMemberAccessChain(call_idx);
-            if (!try p.expectOneOf(.{
-                .ASSIGN,
-                .PLUSASSIGN,
-                .MINUSASSIGN,
-                .MULTASSIGN,
-                .DIVASSIGN,
-            }, "assignment operator"))
-                return error.UnexpectedToken;
-
-            const op = p.token_idx;
-            p.next();
-            const rhs = try p.parseExpression();
-            if (!try p.expectEndOfStatement())
-                return error.UnexpectedToken;
-            p.next();
-            const node_idx = try p.ast.append(.{
-                .tag = .ASSIGNMENT,
-                .token_index = op,
-                .first_child = lhs,
-            });
-            p.ast.get(lhs).next_sibling = rhs;
-            return node_idx;
-        }
-        if (!try p.expectEndOfStatement())
-            return error.UnexpectedToken;
-        p.next();
-        return call_idx;
-    }
-
     pub fn parseCallOrInst(p: *Parser) InternalParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .IDENTIFIER);
         const name_token = p.token_idx;
@@ -842,91 +810,6 @@ pub const Parser = struct {
 
         p.ast.get(node_idx).first_child = arg_list.start_index;
 
-        return node_idx;
-    }
-
-    /// in case of parse error consumes all tokens till .EOL or .SEMICOLON and returns 0
-    pub fn parserDeclOrAssign(p: *Parser) InternalParserError!AstNodeIndex {
-        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
-
-        const ident_token_idx = p.token_idx;
-        p.next();
-
-        // Check for member access chain on LHS: a.b.c = ...
-        if (p.peek(0).tag == .DOT) {
-            var lhs = try p.ast.append(.{
-                .tag = .ATOM,
-                .token_index = ident_token_idx,
-            });
-            lhs = try p.parseMemberAccessChain(lhs);
-
-            if (!try p.expectOneOf(.{
-                .ASSIGN,
-                .PLUSASSIGN,
-                .MINUSASSIGN,
-                .MULTASSIGN,
-                .DIVASSIGN,
-            }, "assignment operator"))
-                return error.UnexpectedToken;
-
-            const op = p.token_idx;
-            p.next();
-
-            const rhs = try p.parseExpression();
-
-            if (!try p.expectEndOfStatement())
-                return error.UnexpectedToken;
-            p.next();
-
-            const node_idx = try p.ast.append(.{
-                .tag = .ASSIGNMENT,
-                .token_index = op,
-                .first_child = lhs,
-            });
-            p.ast.get(lhs).next_sibling = rhs;
-            return node_idx;
-        }
-
-        // COLON → declaration (with optional type)
-        if (p.peek(0).tag == .COLON) {
-            p.next();
-            const decl = try p.parseDeclaration(ident_token_idx);
-            if (!try p.expectEndOfStatement())
-                return error.UnexpectedToken;
-            p.next();
-            return decl;
-        }
-
-        // Assignment operators
-        if (!try p.expectOneOf(.{
-            .ASSIGN,
-            .PLUSASSIGN,
-            .MINUSASSIGN,
-            .MULTASSIGN,
-            .DIVASSIGN,
-        }, "assignment or declaration operator"))
-            return error.UnexpectedToken;
-
-        const variable_idx = try p.ast.append(.{
-            .tag = .ATOM,
-            .token_index = ident_token_idx,
-        });
-
-        const op = p.token_idx;
-        p.next();
-
-        const rhs = try p.parseExpression();
-
-        if (!try p.expectEndOfStatement())
-            return error.UnexpectedToken;
-        p.next();
-
-        const node_idx = try p.ast.append(.{
-            .tag = .ASSIGNMENT,
-            .token_index = op,
-            .first_child = variable_idx,
-        });
-        p.ast.get(variable_idx).next_sibling = rhs;
         return node_idx;
     }
 
@@ -1018,6 +901,28 @@ pub const Parser = struct {
         return node_idx;
     }
 
+    fn parseIdentifierStatement(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
+        const expr = try p.parseExpression();
+        if (p.peek(0).tag == .COLON) {
+            const lhs_node = p.ast.get(expr);
+            if (lhs_node.tag != .ATOM or p.tokens[lhs_node.token_index].tag != .IDENTIFIER) {
+                try p.emitError(lhs_node.token_index, "identifier before ':'");
+                return error.UnexpectedToken;
+            }
+            p.next(); // consume :
+            const decl = try p.parseDeclaration(lhs_node.token_index);
+            if (!try p.expectEndOfStatement())
+                return error.UnexpectedToken;
+            p.next();
+            return decl;
+        }
+        if (!try p.expectEndOfStatement())
+            return error.UnexpectedToken;
+        p.next();
+        return expr;
+    }
+
     pub fn parseStatement(p: *Parser) ParserError!AstNodeIndex {
         // std.debug.print("####parseStatement: {} {s}[{s}]\n", .{ p.token_idx, @tagName(p.peek(0).tag), p.peek(0).str(p.source) });
         var res: InternalParserError!AstNodeIndex = 0;
@@ -1029,13 +934,7 @@ pub const Parser = struct {
             .FN         => res = p.parseFnDecl(),
             .STRUCT     => res = p.parseStructDecl(),
             // zig fmt: on
-            .IDENTIFIER => {
-                if (p.peek(1).tag == .LPAREN) {
-                    res = p.parseCallOrInstStatement();
-                } else {
-                    res = p.parserDeclOrAssign();
-                }
-            },
+            .IDENTIFIER => res = p.parseIdentifierStatement(),
             else => {
                 try p.emitError(p.token_idx, "statement");
                 res = error.UnexpectedToken;

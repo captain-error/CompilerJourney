@@ -4,6 +4,7 @@ const par = @import("parser.zig");
 const util = @import("util.zig");
 const ft_ast = @import("ft_ast.zig");
 const nr = @import("name_resolution.zig");
+const elab = @import("ast_elaboration.zig");
 
 const assert = std.debug.assert;
 
@@ -1046,6 +1047,7 @@ const TypeInferer = struct {
     fn inferAssignment(ti: *TypeInferer, ast_idx: AstNodeIndex) !StamentIndex {
         const node = ti.ast.get(ast_idx);
         const op_token = ti.tokens[node.token_index];
+        const assign_kind = tokenToAssignmentKind(op_token.tag);
 
         const lhs_ast_idx = node.first_child;
         assert(lhs_ast_idx != 0);
@@ -1053,51 +1055,42 @@ const TypeInferer = struct {
         const rhs_ast_idx = lhs_ast.next_sibling;
         assert(rhs_ast_idx != 0);
 
-        // Handle member access on LHS
-        if (lhs_ast.tag == .MEMBER_ACCESS)
-            return ti.inferMemberAssignment(ast_idx, lhs_ast_idx, rhs_ast_idx, op_token.tag);
+        const lhs_expr = try ti.inferExpr(lhs_ast_idx);
 
-        // Regular variable assignment
-        const decl_idx = ti.di.name_resolution[lhs_ast_idx];
-        assert(decl_idx != .NONE);
-        const var_decl_idx = ti.decl_map.get(decl_idx).?;
-        const var_decl = ti.ft.var_decls.items[var_decl_idx];
+        // ATOM: check for fn param immutability and result variable
+        if (lhs_ast.tag == .ATOM) {
+            const lhs_var_decl_idx = ti.ft.expressions.items[lhs_expr].kind.VAR_REF;
+            const lhs_var_decl_kind = ti.ft.var_decls.items[lhs_var_decl_idx].kind;
 
-        // Check immutability of fn params
-        if (var_decl.kind == .FN_PARAM) {
-            try ti.addError(.{ .fn_params_are_immutable = .{ .declaration = ti.di.declarations.items[@intFromEnum(decl_idx)].name_token_idx, .usage = lhs_ast.token_index } });
-            return error.OutOfMemory; // abort this statement
-        }
-
-        if (var_decl.kind == .RESULT) {
-            const rhs_expr = try ti.inferExpr(rhs_ast_idx);
-            const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
-
-            // Update result type
-            if (ti.ft.var_decls.items[var_decl_idx].type_ == DkType.UNKNOWN) {
-                ti.ft.var_decls.items[var_decl_idx].type_ = rhs_type;
-            } else if (ti.ft.var_decls.items[var_decl_idx].type_ != rhs_type and rhs_type != DkType.ERROR) {
-                try ti.addError(.{ .result_type_mismatch = .{ .ast_node = ast_idx, .lhs = ti.ft.var_decls.items[var_decl_idx].type_, .rhs = rhs_type } });
+            if (lhs_var_decl_kind == .FN_PARAM) {
+                const decl_idx = ti.di.name_resolution[lhs_ast_idx];
+                try ti.addError(.{ .fn_params_are_immutable = .{
+                    .declaration = ti.di.declarations.items[@intFromEnum(decl_idx)].name_token_idx,
+                    .usage = lhs_ast.token_index,
+                } });
+                return error.OutOfMemory;
             }
 
-            const stmt_idx: StamentIndex = @intCast(ti.ft.statements.items.len);
-            try ti.ft.statements.append(ti.gpa, .{
-                .kind = .{ .RESULT_ASSIGN = .{ .type_ = rhs_type, .rhs = rhs_expr } },
-            });
-            return stmt_idx;
+            if (lhs_var_decl_kind == .RESULT) {
+                const rhs_expr = try ti.inferExpr(rhs_ast_idx);
+                const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
+                if (ti.ft.var_decls.items[lhs_var_decl_idx].type_ == DkType.UNKNOWN) {
+                    ti.ft.var_decls.items[lhs_var_decl_idx].type_ = rhs_type;
+                    ti.ft.expressions.items[lhs_expr].type_ = rhs_type;
+                } else if (ti.ft.var_decls.items[lhs_var_decl_idx].type_ != rhs_type and rhs_type != DkType.ERROR) {
+                    try ti.addError(.{ .result_type_mismatch = .{ .ast_node = ast_idx, .lhs = ti.ft.var_decls.items[lhs_var_decl_idx].type_, .rhs = rhs_type } });
+                }
+                const stmt_idx: StamentIndex = @intCast(ti.ft.statements.items.len);
+                try ti.ft.statements.append(ti.gpa, .{
+                    .kind = .{ .ASSIGNMENT = .{ .lhs = lhs_expr, .kind = assign_kind, .rhs = rhs_expr } },
+                });
+                return stmt_idx;
+            }
         }
 
-        // Normal variable assignment
-        const assign_kind: AssignmentKind = tokenToAssignmentKind(op_token.tag);
-
-        // Type check
-        const lhs_type = var_decl.type_;
-        const rhs_type = blk: {
-            const rhs_expr_idx = try ti.inferExpr(rhs_ast_idx);
-            break :blk .{ rhs_expr_idx, ti.ft.expressions.items[rhs_expr_idx].type_ };
-        };
-        const rhs_expr = rhs_type[0];
-        const rhs_t = rhs_type[1];
+        const lhs_type = ti.ft.expressions.items[lhs_expr].type_;
+        const rhs_expr = try ti.inferExpr(rhs_ast_idx);
+        const rhs_t = ti.ft.expressions.items[rhs_expr].type_;
 
         if (rhs_t != DkType.ERROR and lhs_type != DkType.ERROR) {
             switch (assign_kind) {
@@ -1118,59 +1111,7 @@ const TypeInferer = struct {
 
         const stmt_idx: StamentIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
-            .kind = .{ .ASSIGNMENT = .{
-                .var_decl_idx = var_decl_idx,
-                .type_ = rhs_t,
-                .kind = assign_kind,
-                .rhs = rhs_expr,
-            } },
-        });
-        return stmt_idx;
-    }
-
-    fn inferMemberAssignment(ti: *TypeInferer, _: AstNodeIndex, lhs_ast_idx: AstNodeIndex, rhs_ast_idx: AstNodeIndex, op_tag: tok.Token.Tag) !StamentIndex {
-        const lhs_node = ti.ast.get(lhs_ast_idx);
-        assert(lhs_node.tag == .MEMBER_ACCESS);
-
-        // Infer base expression
-        const base_expr = try ti.inferExpr(lhs_node.first_child);
-        const base_type = ti.ft.expressions.items[base_expr].type_;
-
-        if (!base_type.isStruct()) {
-            try ti.addError(.{ .member_access_on_non_struct = .{ .ast_node = lhs_ast_idx, .actual = base_type } });
-            return error.OutOfMemory;
-        }
-
-        const si = ti.struct_instances.items[base_type.structInstanceIdx()];
-        const template = &ti.di.struct_templates.items[@intFromEnum(si.template_idx)];
-        const members = template.members(&ti.di.params_or_members);
-        const field_name = ti.tokens[lhs_node.token_index].str(ti.source);
-
-        // Find member
-        var member_idx: ?u8 = null;
-        for (members, 0..) |m, i| {
-            if (std.mem.eql(u8, ti.tokens[m.name_token_idx].str(ti.source), field_name)) {
-                member_idx = @intCast(i);
-                break;
-            }
-        }
-
-        if (member_idx == null) {
-            try ti.addError(.{ .unknown_field = .{ .ast_node = lhs_ast_idx, .field_name = lhs_node.token_index } });
-            return error.OutOfMemory;
-        }
-
-        const rhs_expr = try ti.inferExpr(rhs_ast_idx);
-        const assign_kind = tokenToAssignmentKind(op_tag);
-
-        const stmt_idx: StamentIndex = @intCast(ti.ft.statements.items.len);
-        try ti.ft.statements.append(ti.gpa, .{
-            .kind = .{ .MEMBER_ASSIGN = .{
-                .base = base_expr,
-                .member_idx = member_idx.?,
-                .kind = assign_kind,
-                .rhs = rhs_expr,
-            } },
+            .kind = .{ .ASSIGNMENT = .{ .lhs = lhs_expr, .kind = assign_kind, .rhs = rhs_expr } },
         });
         return stmt_idx;
     }
@@ -1713,6 +1654,9 @@ test "merged: zinseszins program" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
@@ -1752,6 +1696,9 @@ test "merged: type error in binary op" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
@@ -1784,6 +1731,9 @@ test "merged: generic function instantiation" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1823,6 +1773,9 @@ test "function with default args" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
@@ -1853,6 +1806,9 @@ test "function with named args" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
@@ -1880,6 +1836,9 @@ test "function missing required arg" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
@@ -1910,6 +1869,9 @@ test "non-default param after default" {
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
 
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
@@ -1939,6 +1901,9 @@ test "supply wrong type to fn param with default" {
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();

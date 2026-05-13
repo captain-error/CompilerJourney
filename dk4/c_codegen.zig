@@ -244,8 +244,7 @@ const CCodegen = struct {
             },
             .ASSIGNMENT => |a| {
                 try self.emitIndent();
-                const var_decl = self.ft.var_decls.items[a.var_decl_idx];
-                try self.emitStr(var_decl.name);
+                try self.emitExpression(a.lhs, 0, false);
                 try self.emitStr(switch (a.kind) {
                     .ASSIGN => " = ",
                     .PLUS => " += ",
@@ -254,12 +253,6 @@ const CCodegen = struct {
                     .DIV => " /= ",
                 });
                 try self.emitExpression(a.rhs, 0, false);
-                try self.emitStr(";\n");
-            },
-            .RESULT_ASSIGN => |ra| {
-                try self.emitIndent();
-                try self.emitStr("result = ");
-                try self.emitExpression(ra.rhs, 0, false);
                 try self.emitStr(";\n");
             },
             .IF_STMT => |ifs| {
@@ -294,24 +287,6 @@ const CCodegen = struct {
             .FN_CALL => |expr_idx| {
                 try self.emitIndent();
                 try self.emitExpression(expr_idx, 0, false);
-                try self.emitStr(";\n");
-            },
-            .MEMBER_ASSIGN => |ma| {
-                try self.emitIndent();
-                try self.emitExpression(ma.base, 0, false);
-                const base_type = self.ft.expressions.items[ma.base].type_;
-                const sd = self.ft.struct_decls.items[base_type.structInstanceIdx()];
-                const member = self.ft.var_decls.items[sd.members.start + ma.member_idx];
-                try self.emitByte('.');
-                try self.emitStr(member.name);
-                try self.emitStr(switch (ma.kind) {
-                    .ASSIGN => " = ",
-                    .PLUS => " += ",
-                    .MINUS => " -= ",
-                    .MULT => " *= ",
-                    .DIV => " /= ",
-                });
-                try self.emitExpression(ma.rhs, 0, false);
                 try self.emitStr(";\n");
             },
             .INVALID => unreachable,
@@ -697,6 +672,7 @@ const tok = @import("tokenizer.zig");
 const par = @import("parser.zig");
 const nr = @import("name_resolution.zig");
 const type_inference = @import("type_inference.zig");
+const elab = @import("ast_elaboration.zig");
 
 const TokenStream = tok.TokenStream;
 
@@ -709,6 +685,9 @@ fn runCompilerAndCompareOutput(source: []const u8, expected_c: []const u8) !void
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
 
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
