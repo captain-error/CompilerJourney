@@ -108,7 +108,7 @@ pub const AssignmentKind = enum {
 };
 
 pub const ScopeIndex = u29;
-pub const StamentIndex = u31;
+pub const StatementIndex = u31;
 pub const ExpressionIndex = u32;
 pub const VarDeclIndex = u30;
 pub const FnDeclIndex = u28;
@@ -121,10 +121,19 @@ pub fn IndexRange(IndexType: type) type {
 }
 
 pub const Scope = struct {
-    kind: enum(u8) { INVALID = 0, FN, IF, ELSE, WHILE } = .INVALID,
+    kind: Kind = .INVALID,
     parent_scope: ScopeIndex = 0,
-    first_statement: StamentIndex = 0, // linked list of statements in this scope (linked via next_sibling)
+    first_statement: StatementIndex = 0, // linked list of statements in this scope (linked via next_sibling)
     first_decl: VarDeclIndex = 0, // linked list of variable declarations in this scope (linked via next_sibling)
+
+    pub const Kind = enum(u8) {
+        INVALID = 0,
+        FN,
+        IF,
+        ELSE,
+        WHILE,
+        DEFER
+    };
 };
 
 pub const VarDecl = struct {
@@ -195,8 +204,13 @@ pub const Expression = struct {
     } = .INVALID,
 };
 
+pub const DeferStatement = struct {
+    line_number: u32,
+    scope: ScopeIndex,
+};
+
 pub const Statement = struct {
-    next_sibling: StamentIndex = 0,
+    next_sibling: StatementIndex = 0,
     kind: union(enum) {
         INVALID: void,
         VAR_DECL: struct {
@@ -218,6 +232,10 @@ pub const Statement = struct {
             body_scope: ScopeIndex = 0,
         },
         FN_CALL: ExpressionIndex,
+        DEFER: DeferStatement,
+        BREAK: void,
+        CONTINUE: void,
+        RETURN: void,
     } = .INVALID,
 };
 

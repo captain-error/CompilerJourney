@@ -31,6 +31,7 @@ fn testAstStructure(ast: *const AST) void {
             .WHILE            => assert(num_kids == 2),
             .UNARY_OP         => assert(num_kids == 1),
             .BLOCK            => {},
+            .DEFER            => assert(num_kids == 1), // statement or block
             .CALL_OR_INST     => {},
             .NAMED_ARG        => assert(num_kids == 1),
             .FNPARAMS         => {},
@@ -1049,7 +1050,6 @@ test "parse struct with array member and fill" {
 }
 
 test "parse struct with array literal member" {
-    std.debug.print("Heyho lets go!\n", .{});
     const source =
         \\struct S
         \\    arr:= [1,2,3]
@@ -1222,11 +1222,19 @@ fn expectAstStructure(
 // fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex
 fn testParser(source: []const u8, parse_func: anytype, expected_structure: anytype, print_always: bool) !void {
     const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var stdout_buff: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buff);
+    var stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buff);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch unreachable;
+    // const terminal = std.Io.Terminal{
+    //     .writer = stdout,
+    //     .mode = try std.Io.Terminal.Mode.detect(io, stdout_file, false, false),
+    // };
 
     var ts = try TokenStream.init(source, gpa);
     defer ts.deinit(gpa);

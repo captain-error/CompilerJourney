@@ -2,6 +2,91 @@ const std = @import("std");
 
 const assert = std.debug.assert;
 
+pub fn FixedSizeStack(comptime T: type, comptime capacity : comptime_int) type {
+    return struct {
+        items: [capacity]T = [_]T{.{}}**capacity,
+        size: u32 = 0,
+
+        pub fn clear(self: *FixedSizeStack(T, capacity)) void {
+            self.size = 0;
+        }
+
+        pub fn push_without_init(self: *FixedSizeStack(T, capacity)) !void {
+            if (self.size >= capacity) 
+                return error.FixedSizeStackOverflow;
+            self.size += 1;
+        }
+
+        pub fn pop(self: *FixedSizeStack(T, capacity)) *T {
+            assert (self.size > 0);
+            self.size -= 1;
+            return &self.items[self.size];
+        }
+
+        pub fn peek(self: *FixedSizeStack(T, capacity), depth: u32) *T {
+            assert (depth < self.size);
+            return &self.items[self.size - 1 - depth];
+        }
+
+        pub fn top(self: *FixedSizeStack(T, capacity)) *T {
+            assert (self.size > 0);
+            return &self.items[self.size - 1];
+        }
+    };
+}
+
+pub fn DynamicStack(comptime T: type) type {
+    return struct {
+        _array_list: std.ArrayList(T) = .empty,
+
+        pub const Iterator = struct {
+            stack : *DynamicStack(T),
+            index : usize,
+
+            pub fn next(self: *Iterator) ?*T {
+                if (self.index == 0)
+                    return null;
+                self.index -= 1;
+                return &self.stack._array_list.items[self.index];
+            }
+        };
+
+        pub fn deinit(self: *DynamicStack(T), gpa : std.mem.Allocator) void {
+            self._array_list.deinit(gpa);
+        }
+
+        pub fn clear(self: *DynamicStack(T)) void {
+            self._array_list.clearRetainingCapacity();
+        }
+
+        pub fn size(self: *const DynamicStack(T)) usize {
+            return self._array_list.items.len;
+        }
+
+        pub fn push(self: *DynamicStack(T), gpa : std.mem.Allocator, item: T) !void {
+            try self._array_list.append(gpa, item);
+        }
+
+        pub fn pop(self: *DynamicStack(T)) ?*T {
+            assert(self.size() > 0);
+            return self._array_list.pop();
+        }
+
+        pub fn peek(self: *DynamicStack(T), depth: u32) *T {
+            assert(depth < self.size());
+            return &self._array_list.items[self.size() - 1 - depth];
+        }
+
+        pub fn top(self: *DynamicStack(T)) *T {
+            assert(self.size() > 0);
+            return &self._array_list.items[self.size() - 1];
+        }
+
+        pub fn iterator(self: *DynamicStack(T)) Iterator {
+            return Iterator{ .stack = self, .index = self.size() };
+         }
+    };
+}
 
 fn IndexRange_(IndexType : type) type {
     return struct {

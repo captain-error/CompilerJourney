@@ -67,6 +67,7 @@ pub const AstNodeTag = enum(u8) {
     NAMED_ARG, // token_index = field name IDENT. 1 child: value expression.
     WHILE, // 2 children: condition, body
     BLOCK, // arbitrary many children
+    DEFER, // 1 child: deferred statement or block
     ATOM, // no child
     IF, // 3 children: condition, then, else
     STRUCTDECL, // token_index = struct name IDENT. children: MEMBER nodes
@@ -903,6 +904,25 @@ pub const Parser = struct {
         return expr;
     }
 
+    fn parseDefer(p: *Parser) ParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .DEFER);
+        const node_idx = try p.ast.append(.{ 
+            .token_index = p.token_idx, 
+            .tag = .DEFER,
+            });
+        p.next();
+
+        if(p.peek(0).tag == .BEGIN_BLOCK) {
+            const block_idx = try p.parseIndentedCodeBlock();
+            p.ast.get(node_idx).first_child = block_idx;
+        } else {
+            const stmt_idx = try p.parseStatement();
+            p.ast.get(node_idx).first_child = stmt_idx;
+        }
+
+        return node_idx;
+    }
+
     pub fn parseStatement(p: *Parser) ParserError!AstNodeIndex {
         // std.debug.print("####parseStatement: {} {s}[{s}]\n", .{ p.token_idx, @tagName(p.peek(0).tag), p.peek(0).str(p.source) });
         var res: InternalParserError!AstNodeIndex = 0;
@@ -913,6 +933,7 @@ pub const Parser = struct {
             .RETURN     => res = p.parseReturn(),
             .FN         => res = p.parseFnDecl(),
             .STRUCT     => res = p.parseStructDecl(),
+            .DEFER      => res = p.parseDefer(),
             // zig fmt: on
             .IDENTIFIER => res = p.parseIdentifierStatement(),
             else => {

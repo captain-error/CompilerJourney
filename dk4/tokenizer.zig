@@ -61,6 +61,7 @@ pub const Token = struct {
         MINUSASSIGN,
 
         UNDERSCORE,
+        DEFER,
 
         IF,
         ELSE,
@@ -329,7 +330,10 @@ pub const Tokenizer = struct {
             }
 
             const word = tail[0..len];
-            // FIXME: this can be done without revisiting
+            // OPTIMIZE ME:
+            // + first check length to avoid unnecessary comparisons
+            // + implement simple comparison function which takes a compime string literal
+
             // zig fmt: off
             if (std.mem.eql(u8, "_"     , word)) return t.emit(.UNDERSCORE, len);
             if (std.mem.eql(u8, "or"    , word)) return t.emit(.OR        , len);
@@ -341,6 +345,7 @@ pub const Tokenizer = struct {
             if (std.mem.eql(u8, "else"  , word)) return t.emit(.ELSE      , len);
             if (std.mem.eql(u8, "true"  , word)) return t.emit(.TRUE      , len);
             if (std.mem.eql(u8, "false" , word)) return t.emit(.FALSE     , len);
+            if (std.mem.eql(u8, "defer" , word)) return t.emit(.DEFER     , len);
             if (std.mem.eql(u8, "while" , word)) return t.emit(.WHILE     , len);
             if (std.mem.eql(u8, "struct", word)) return t.emit(.STRUCT    , len);
             if (std.mem.eql(u8, "return", word)) return t.emit(.RETURN    , len);

@@ -280,8 +280,6 @@ const Resolver = struct {
         return r.tokens[idx].str(r.source);
     }
 
-    // -- Two-pass resolution for declaration scopes --
-
     /// Two-pass resolution for a declaration scope (file, namespace, struct body with methods).
     /// Pass A: register all FNDECL/STRUCTDECL names.
     /// Pass B: build templates + resolve bodies.
@@ -364,8 +362,7 @@ const Resolver = struct {
         });
     }
 
-    // -- Resolve function declaration: build template + resolve body --
-
+    /// Resolve function declaration: build template + resolve body
     fn resolveFnDecl(r: *Resolver, node_idx: AstNodeIndex, node: *AstNode, decl_idx: DeclIndex) !void {
         try r.buildFunctionTemplate(node_idx, node, decl_idx);
 
@@ -603,8 +600,6 @@ const Resolver = struct {
         });
     }
 
-    // -- Resolve blocks and statements --
-
     fn resolveBlock(r: *Resolver, block_idx: AstNodeIndex) !void {
         const block = r.ast.get(block_idx);
         assert(block.tag == .BLOCK);
@@ -626,6 +621,7 @@ const Resolver = struct {
             .IF => try r.resolveIf(stmt_idx, node),
             .WHILE => try r.resolveWhile(stmt_idx, node),
             .BLOCK => try r.resolveBlock(stmt_idx),
+            .DEFER => try r.resolveStatement(node.first_child),
             .FNDECL => {
                 try r.registerFnOrStruct(stmt_idx, node, .FUNCTION);
                 const name = r.tokenStr(node.token_index);
