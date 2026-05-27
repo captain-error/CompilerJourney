@@ -239,93 +239,6 @@ pub const Statement = struct {
     } = .INVALID,
 };
 
-pub const TypeError = union(enum) {
-    return_type_missing_for_recursive_fn: AstNodeIndex,
-    fn_params_are_immutable: struct {
-        declaration: TokenIndex,
-        usage: TokenIndex,
-    },
-    wrong_num_fun_args: struct {
-        ast_node: AstNodeIndex,
-        expected: u8,
-        actual: u8,
-    },
-    wrong_type: struct {
-        ast_node: AstNodeIndex,
-        expected: [:0]const u8,
-        actual: DkType,
-    },
-    type_mismatch: struct {
-        ast_node: AstNodeIndex,
-        lhs: DkType,
-        rhs: DkType,
-    },
-    result_type_mismatch: struct {
-        ast_node: AstNodeIndex,
-        lhs: DkType,
-        rhs: DkType,
-    },
-    too_many_positional_args: struct {
-        ast_node: AstNodeIndex,
-        expected: u8,
-        actual: u8,
-    },
-    unknown_named_arg: struct {
-        ast_node: AstNodeIndex,
-        member_name: TokenIndex,
-    },
-    duplicate_named_arg: struct {
-        ast_node: AstNodeIndex,
-        member_name: TokenIndex,
-    },
-    missing_required_arg: struct {
-        ast_node: AstNodeIndex,
-        member_name: TokenIndex,
-    },
-    member_access_on_non_struct: struct {
-        ast_node: AstNodeIndex,
-        actual: DkType,
-    },
-    unknown_field: struct {
-        ast_node: AstNodeIndex,
-        field_name: TokenIndex,
-    },
-    multiple_fills_in_array_literal: AstNodeIndex,
-    array_shape_mismatch: struct {
-        ast_node: AstNodeIndex,
-        expected: u16,
-        actual: u16,
-    },
-    cannot_infer_array_size: AstNodeIndex,
-    inconsistent_inner_dim: struct {
-        ast_node: AstNodeIndex,
-        expected: u16,
-        actual: u16,
-    },
-    inconsistent_elem_types_in_array_lit: struct {
-        ast_node: AstNodeIndex,
-        expected: DkType,
-        actual: DkType,
-    },
-    symbol_is_not_array: struct {
-        ast_node: AstNodeIndex,
-        actual: DkType,
-    },
-};
-
-pub const TypeErrorInfo = struct {
-    error_: TypeError,
-    fn_instantiation_stack_top: [MAX_FN_INSTANTIATION_REPORT_DEPTH]InstantiationInfo,
-    fn_instantiation_stack_len: usize,
-
-    pub const InstantiationInfo = struct {
-        function: usize,
-        fn_call_ast_idx: AstNodeIndex,
-    };
-
-    pub const MAX_FN_INSTANTIATION_REPORT_DEPTH = 16;
-};
-
 pub const FtAst = struct {
     // zig fmt: off
     fn_decls:        std.ArrayList(FnDecl),
@@ -335,7 +248,7 @@ pub const FtAst = struct {
     var_decls:       std.ArrayList(VarDecl),
     statements:      std.ArrayList(Statement),
     expressions:     std.ArrayList(Expression),
-    errors:          std.ArrayList(TypeErrorInfo),
+    // errors:          std.ArrayList(TypeErrorInfo),
 
     gpa:   std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -355,7 +268,6 @@ pub const FtAst = struct {
             .var_decls       = try .initCapacity(gpa, 1024),
             .statements      = try .initCapacity(gpa, 1024),
             .expressions     = try .initCapacity(gpa, 1024),
-            .errors          = try .initCapacity(gpa, 8),
         };
 
         res.scopes     .appendAssumeCapacity(.{}); // reserve index 0 for invalid scope
@@ -381,7 +293,6 @@ pub const FtAst = struct {
         self.var_decls       .deinit(self.gpa);
         self.statements      .deinit(self.gpa);
         self.expressions     .deinit(self.gpa);
-        self.errors          .deinit(self.gpa);
         // zig fmt: on
         self.arena.deinit();
     }

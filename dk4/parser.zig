@@ -1139,3 +1139,73 @@ pub fn debugPrintAstBranch(ast_index: AstNodeIndex, ast : *const AST, tokens : [
 
     printAstBranch(bw, ast_index, ast, tokens, source, 0) catch {};
 }
+
+
+pub fn printLineAndMarkAstNode(
+    ast: *const AST,
+    writer: *std.Io.Writer,
+    ts: TokenStream,
+    node_idx: AstNodeIndex,
+    enforce_indent : ?usize,
+) !tok.SourceLoc {
+    const node = ast.get(node_idx);
+    const main_token = ts.tokens[node.token_index];
+    const token_line = ts.token_lines[node.token_index];
+    const line_info = ts.line_infos[token_line];
+
+    const line = ts.source[line_info.start..line_info.end];
+    var num_whitespace : usize = 0;
+    var additional_indent : usize = 0;
+    if (enforce_indent) |indent| {
+        additional_indent = indent;
+        for (line) |c| {
+            if (c == ' ') {
+                num_whitespace += 1;
+                
+            } else {
+                break;
+            }
+        }   
+    }
+
+    // Print the source line.
+    try writer.splatByteAll(' ', additional_indent);
+    try writer.print("{s}\n", .{line[num_whitespace..]});
+
+    const border_tokens = par.getFirstAndLastTokenOfAstBranch(node_idx, ast);
+    var start_char = ts.tokens[border_tokens.first].start;
+    var end_char = ts.tokens[border_tokens.last].end();
+    if( start_char < line_info.start ) {
+        start_char = line_info.start;
+        while(start_char < line_info.end and ts.source[start_char] == ' ')
+            start_char += 1;
+    }
+    if( end_char > line_info.end ) {
+        end_char = line_info.end;
+        while(end_char > line_info.start and ts.source[end_char - 1] == ' ')
+            end_char -= 1;
+    }
+
+    // Build underline buffer: space = no mark, '^' = main token, '~' = other tokens in branch.
+    var underline: [256]u8 = .{' '} ** 256;
+    var underline_len: usize = 0;
+
+    {   
+        const start_col = start_char-line_info.start;
+        const end_col = @min(end_char-line_info.start, underline.len);
+        @memset(underline[start_col..end_col], '"');
+        underline_len = end_col;
+    }
+    // Main token overwrites with '^'.
+    {   
+        const start_col = main_token.start-line_info.start;
+        const end_col = @min(main_token.end() - line_info.start, underline.len);
+        @memset(underline[start_col..end_col], '^');
+    }
+
+    try writer.splatByteAll(' ', additional_indent);
+    try writer.print("{s}\n", .{underline[num_whitespace..underline_len]});
+
+    return .{ .line = token_line, .column = main_token.start - line_info.start };
+}
+

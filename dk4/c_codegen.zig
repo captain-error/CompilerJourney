@@ -996,10 +996,14 @@ test "generate C with correct oprerator precedence and associativity" {
     try runCompilerAndCompareOutput(source, expected);
 }
 
-test "generate C output simple defer" {
+test "generate C with defer" {
     const source =
         \\fn main()
         \\    x := 3.0
+        \\    if x < 10.0
+        \\        x -= 0.1
+        \\        defer x += 0.2
+        \\        x += 1.0
         \\    defer a := 2
         \\    defer b := 3
         \\    result = x + 1.0;
@@ -1017,15 +1021,22 @@ test "generate C output simple defer" {
         \\int main(void) {
         \\    double result;
         \\    double x = 3e0;
-        \\    result = x + 1e0;
-        \\    _dk_defer__0_3: {
-        \\        int64_t b = 3;
-        \\    }
-        \\    _dk_defer__0_2: {
-        \\        int64_t a = 2;
-        \\    }
-        \\    printf("%.6f\n", result);
-        \\    return 0;
+        \\     if (x < 1e1) {
+        \\         x -= 1e-1;
+        \\         x += 1e0;
+        \\         _dk_defer__1_4: {
+        \\             x += 2e-1;
+        \\         }
+        \\     }
+        \\         result = x + 1e0;
+        \\     _dk_defer__0_7: {
+        \\         int64_t b = 3;
+        \\     }
+        \\     _dk_defer__0_6: {
+        \\         int64_t a = 2;
+        \\     }
+        \\     printf("%.6f\n", result);
+        \\     return 0;
         \\}
     ;
 
