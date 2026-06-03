@@ -21,8 +21,7 @@ const FtAst = ft_ast.FtAst;
 const Scope = ft_ast.Scope;
 
 const DkType = ft_ast.DkType;
-const TypeError = ft_ast.TypeError;
-const TypeErrorInfo = ft_ast.TypeErrorInfo;
+
 const BinaryOp = ft_ast.BinaryOp;
 const UnaryOp = ft_ast.UnaryOp;
 const AssignmentKind = ft_ast.AssignmentKind;
@@ -40,6 +39,101 @@ const ParamsOrMembers = nr.ParamsOrMembers;
 
 const MAX_NUM_FUNCTION_PARAMS = 32;
 const MAX_TYPEVARS = 32;
+
+
+pub const TypeError = union(enum) {
+    return_type_missing_for_recursive_fn: AstNodeIndex,
+    fn_params_are_immutable: struct {
+        declaration: TokenIndex,
+        usage: TokenIndex,
+    },
+    wrong_num_fun_args: struct {
+        ast_node: AstNodeIndex,
+        expected: u8,
+        actual: u8,
+    },
+    wrong_type: struct {
+        ast_node: AstNodeIndex,
+        expected: [:0]const u8,
+        actual: DkType,
+    },
+    type_mismatch: struct {
+        ast_node: AstNodeIndex,
+        lhs: DkType,
+        rhs: DkType,
+    },
+    result_type_mismatch: struct {
+        ast_node: AstNodeIndex,
+        lhs: DkType,
+        rhs: DkType,
+    },
+    too_many_positional_args: struct {
+        ast_node: AstNodeIndex,
+        expected: u8,
+        actual: u8,
+    },
+    unknown_named_arg: struct {
+        ast_node: AstNodeIndex,
+        member_name: TokenIndex,
+    },
+    duplicate_named_arg: struct {
+        ast_node: AstNodeIndex,
+        member_name: TokenIndex,
+    },
+    missing_required_arg: struct {
+        ast_node: AstNodeIndex,
+        member_name: TokenIndex,
+    },
+    member_access_on_non_struct: struct {
+        ast_node: AstNodeIndex,
+        actual: DkType,
+    },
+    unknown_field: struct {
+        ast_node: AstNodeIndex,
+        field_name: TokenIndex,
+    },
+    multiple_fills_in_array_literal: AstNodeIndex,
+    array_shape_mismatch: struct {
+        ast_node: AstNodeIndex,
+        expected: u16,
+        actual: u16,
+    },
+    array_dimensionality_mismatch: struct {
+        ast_node: AstNodeIndex,
+        expected: u16,
+        actual: u16,
+    },
+    cannot_infer_array_size: AstNodeIndex,
+    inconsistent_inner_dim: struct {
+        ast_node: AstNodeIndex,
+        expected: u16,
+        actual: u16,
+    },
+    inconsistent_elem_types_in_array_lit: struct {
+        ast_node: AstNodeIndex,
+        expected: DkType,
+        actual: DkType,
+    },
+    symbol_is_not_array: struct {
+        ast_node: AstNodeIndex,
+        actual: DkType,
+    },
+};
+
+pub const TypeErrorInfo = struct {
+    error_: TypeError,
+    fn_instantiation_stack_top: [MAX_FN_INSTANTIATION_REPORT_DEPTH]InstantiationInfo,
+    fn_instantiation_stack_len: usize,
+
+    pub const InstantiationInfo = struct {
+        fn_decl_idx: FnDeclIndex, // points into FtAst structure. FIXME: this is what I want. but how to fill in this info?
+        fn_call_ast_idx: AstNodeIndex,
+    };
+
+    pub const MAX_FN_INSTANTIATION_REPORT_DEPTH = 16;
+};
+
+
 
 // -----------------------------------------------------------------------
 // DkType ↔ DeclIndex mapping for builtin types
@@ -189,12 +283,193 @@ pub const StructInstance = struct {
     first_member_type_idx: Types.Index = .NONE,
 };
 
+pub const InferResult = struct {
+    ft_ast: FtAst,
+    errors: std.ArrayList(TypeErrorInfo),
+
+    pub fn deinit(self: *InferResult, gpa: std.mem.Allocator) void {
+        self.ft_ast.deinit();
+        self.errors.deinit(gpa);
+    }
+
+    pub fn hasErrors(self: *const InferResult) bool {
+        return self.errors.items.len > 0;
+    }
+
+    pub fn printErrors(ir: *const InferResult, ast: *const par.AST, ts: TokenStream, writer: *std.Io.Writer) !void {
+        const code_indent = 4;
+
+        try writer.writeByte('\n');
+        for (ir.errors.items) |error_info| {
+            if (error_info.fn_instantiation_stack_len > 0) {
+                const inst_info = error_info.fn_instantiation_stack_top[0];
+                const fn_decl = ir.ft_ast.fn_decls.items[inst_info.fn_decl_idx];
+                try writer.print("in fn {s}(", .{fn_decl.name});
+                for (ir.ft_ast.var_decls.items[fn_decl.params.start..fn_decl.params.end]) |param|
+                    try writer.print("{s},", .{param.type_.langName()});
+                try writer.writeAll("):\n");
+            }
+
+            const err = error_info.error_;
+            switch (err) {
+                .return_type_missing_for_recursive_fn => |node_idx| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, node_idx, code_indent);
+                    const node = ast.get(node_idx);
+                    try writer.print(
+                        "line {}: Error: cannot infer return type for recursive function \"{s}\". Return type must be explicitly declared.\n",
+                        .{ pos.line, ts.sourceStr(node.token_index) },
+                    );
+                },
+                .fn_params_are_immutable => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.usage);
+                    try writer.print(
+                        "line {}: Error: function parameters are immutable, but parameter \"{s}\" is assigned a value.\n",
+                        .{ pos.line, ts.sourceStr(e.declaration) },
+                    );
+                },
+                .wrong_num_fun_args => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: wrong number of function arguments: {}. Expected: {}.\n",
+                        .{ pos.line, e.actual, e.expected },
+                    );
+                },
+                .wrong_type => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: wrong type: {s}. Expected: {s}.\n",
+                        .{ pos.line, e.actual.langName(), e.expected },
+                    );
+                },
+                .type_mismatch => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: type mismatch: LHS: {s}. RHS: {s}.\n",
+                        .{ pos.line, e.lhs.langName(), e.rhs.langName() },
+                    );
+                },
+                .result_type_mismatch => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: result type mismatch: expected {s}, got {s}.\n",
+                        .{ pos.line, e.lhs.langName(), e.rhs.langName() },
+                    );
+                },
+                .too_many_positional_args => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: too many positional arguments: {}. Expected: {}.\n",
+                        .{ pos.line, e.actual, e.expected },
+                    );
+                },
+                .unknown_named_arg => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: unknown named argument \"{s}\".\n",
+                        .{ pos.line, ts.sourceStr(e.member_name) },
+                    );
+                },
+                .duplicate_named_arg => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: duplicate named argument \"{s}\".\n",
+                        .{ pos.line, ts.sourceStr(e.member_name) },
+                    );
+                },
+                .missing_required_arg => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: missing required argument \"{s}\".\n",
+                        .{ pos.line, ts.sourceStr(e.member_name) },
+                    );
+                },
+                .member_access_on_non_struct => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: member access on non-struct type {s}.\n",
+                        .{ pos.line, e.actual.langName() },
+                    );
+                },
+                .unknown_field => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: unknown field \"{s}\".\n",
+                        .{ pos.line, ts.sourceStr(e.field_name) },
+                    );
+                },
+                .multiple_fills_in_array_literal => |node_idx| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, node_idx, code_indent);
+                    try writer.print(
+                        "line {}: Error: multiple fill expressions in array literal.\n",
+                        .{pos.line},
+                    );
+                },
+                .array_shape_mismatch => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: array shape mismatch: expected {}, got {}.\n",
+                        .{ pos.line, e.expected, e.actual },
+                    );
+                },
+                .array_dimensionality_mismatch => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: array dimensionality mismatch: expected {} dimensions, got {}.\n",
+                        .{ pos.line, e.expected, e.actual },
+                    );
+                },
+                .cannot_infer_array_size => |node_idx| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, node_idx, code_indent);
+                    try writer.print(
+                        "line {}: Error: cannot infer array size.\n",
+                        .{pos.line},
+                    );
+                },
+                .inconsistent_inner_dim => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: inconsistent inner dimension: expected {}, got {}.\n",
+                        .{ pos.line, e.expected, e.actual },
+                    );
+                },
+                .inconsistent_elem_types_in_array_lit => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: inconsistent element types in array literal: expected {s}, got {s}.\n",
+                        .{ pos.line, e.expected.langName(), e.actual.langName() },
+                    );
+                },
+                .symbol_is_not_array => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: expected array type, got {s}.\n",
+                        .{ pos.line, e.actual.langName() },
+                    );
+                },
+            }
+            try ir.printInstantiationStack(ast, writer, ts, error_info, code_indent);
+            try writer.writeByte('\n');
+        }
+
+        try writer.flush();
+    }
+
+    fn printInstantiationStack(ir: *const InferResult, ast: *const par.AST, writer: *std.Io.Writer, ts: TokenStream, error_info: TypeErrorInfo, indent: usize) !void {
+        if (error_info.fn_instantiation_stack_len <= 1) return;
+        for (error_info.fn_instantiation_stack_top[1..error_info.fn_instantiation_stack_len]) |info| {
+            const fn_decl = ir.ft_ast.fn_decls.items[info.fn_decl_idx];
+            _ = try par.printLineAndMarkAstNode(ast, writer, ts, info.fn_call_ast_idx, indent);
+            try writer.print("  called from fn {s}\n", .{fn_decl.name});
+        }
+    }
+};
+
 pub fn infer(
     gpa: std.mem.Allocator,
     ts: TokenStream,
     ast: *const AST,
     di: *const DeclInfo,
-) !FtAst {
+) !InferResult {
     var ft = try FtAst.init(gpa);
     errdefer ft.deinit();
 
@@ -215,9 +490,13 @@ pub fn infer(
         .gpa = gpa,
     };
     defer ti.deinit();
+    errdefer ti.errors.deinit(gpa);
 
     try ti.checkAndReconstructTypes();
-    return ft;
+    return InferResult{
+        .ft_ast = ft,
+        .errors = ti.errors,
+    };
 }
 
 // -----------------------------------------------------------------------
@@ -297,6 +576,7 @@ const TypeInferer = struct {
 
     // Output: FtAst being built
     ft: *FtAst,
+    errors: std.ArrayList(TypeErrorInfo) = .empty,
 
     // Instantiation tracking
     fn_instances: FunctionInstances,
@@ -328,6 +608,8 @@ const TypeInferer = struct {
         ti.decl_map.deinit(ti.gpa);
         ti.fn_instantiation_stack.deinit(ti.gpa);
         ti.fn_instantiation_ast_idx_stack.deinit(ti.gpa);
+        // we intentionally do not free ti.errors here since it is returned with the type inference result.
+        // ti.errors.deinit(ti.gpa);
     }
 
     // -----------------------------------------------------------------------
@@ -345,11 +627,11 @@ const TypeInferer = struct {
             const idx1 = @as(i32, @intCast(ti.fn_instantiation_stack.items.len)) - @as(i32, @intCast(1 + i));
             const idx2 = @as(i32, @intCast(ti.fn_instantiation_ast_idx_stack.items.len)) - @as(i32, @intCast(i));
             error_info.fn_instantiation_stack_top[i] = .{
-                .function = ti.fn_instantiation_stack.items[@intCast(idx1)],
+                .fn_decl_idx = ti.fn_instances.getByIndex(@intCast(ti.fn_instantiation_stack.items[@intCast(idx1)])).fn_decl_idx,
                 .fn_call_ast_idx = if (idx2 >= 0 and idx2 < ti.fn_instantiation_ast_idx_stack.items.len) ti.fn_instantiation_ast_idx_stack.items[@intCast(idx2)] else 0,
             };
         }
-        try ti.ft.errors.append(ti.gpa, error_info);
+        try ti.errors.append(ti.gpa, error_info);
     }
 
     fn expectType(ti: *TypeInferer, node_idx: AstNodeIndex, actual: DkType, comptime expected: DkType) !void {
@@ -687,7 +969,10 @@ const TypeInferer = struct {
             .IF => ti.inferIf(ast_idx, parent_scope),
             .WHILE => ti.inferWhile(ast_idx, parent_scope),
             .DEFER => ti.inferDefer(ast_idx, parent_scope),
-            else => unreachable,
+            else => {
+                std.debug.print("Unhandled AST node tag: {}\n", .{node.tag});
+                unreachable;
+            },
         };
     }
 
@@ -974,7 +1259,7 @@ const TypeInferer = struct {
                 rhs_expr = lit_result.expr_idx;
                 const shape = lit_result.shape;
                 if (shape.ndim != ann.ndim) {
-                    try ti.addError(.{ .array_shape_mismatch = .{ .ast_node = rhs_ast_idx, .expected = ann.ndim, .actual = shape.ndim } });
+                    try ti.addError(.{ .array_dimensionality_mismatch = .{ .ast_node = rhs_ast_idx, .expected = ann.ndim, .actual = shape.ndim } });
                     var_type = DkType.ERROR;
                 } else {
                     var final_shape: [ft_ast.MAX_ARRAY_NDIM]u16 = .{0} ** ft_ast.MAX_ARRAY_NDIM;
@@ -1653,6 +1938,8 @@ const TypeInferer = struct {
             else => unreachable,
         };
     }
+
+    
 };
 
 // tests for this file have been moved to type_inference_tests.zig

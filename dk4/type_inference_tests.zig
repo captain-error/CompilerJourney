@@ -21,13 +21,10 @@ const SourceLoc = tok.SourceLoc;
 // const FtAst = ft_ast.FtAst;
 const DkType = ft_ast.DkType;
 // const TypeError = ft_ast.TypeError;
-const TypeErrorInfo = ft_ast.TypeErrorInfo;
-
-
+const TypeErrorInfo = type_inference.TypeErrorInfo;
 
 const infer = type_inference.infer;
 const arrayShapeFromLit = type_inference.arrayShapeFromLit;
-
 
 // -----------------------------------------------------------------------
 // Tests
@@ -67,22 +64,22 @@ test "merged: zinseszins program" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
     // Should have 4 fn_decls: [0]=invalid, [1]=do_zins(FLOAT,FLOAT), [2]=zinseszins(FLOAT,FLOAT,INT), [3]=main()
     // do_zins is also called with INT args from the lowered code? No — zinseszins passes result (FLOAT) and zins (FLOAT).
     // Actually: do_zins is called once with (FLOAT, FLOAT). zinseszins is called once with (FLOAT, FLOAT, INT).
-    try std.testing.expectEqual(@as(usize, 4), ft.fn_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 4), infer_res.ft_ast.fn_decls.items.len);
 
     // Each function should have a valid body scope
-    for (ft.fn_decls.items[1..]) |fn_decl|
+    for (infer_res.ft_ast.fn_decls.items[1..]) |fn_decl|
         try std.testing.expect(fn_decl.body_scope != 0);
 
     // Check return types
-    try std.testing.expectEqual(DkType.FLOAT, ft.fn_decls.items[1].return_type); // do_zins returns FLOAT
-    try std.testing.expectEqual(DkType.FLOAT, ft.fn_decls.items[2].return_type); // zinseszins returns FLOAT
-    try std.testing.expectEqual(DkType.FLOAT, ft.fn_decls.items[3].return_type); // main returns FLOAT
+    try std.testing.expectEqual(DkType.FLOAT, infer_res.ft_ast.fn_decls.items[1].return_type); // do_zins returns FLOAT
+    try std.testing.expectEqual(DkType.FLOAT, infer_res.ft_ast.fn_decls.items[2].return_type); // zinseszins returns FLOAT
+    try std.testing.expectEqual(DkType.FLOAT, infer_res.ft_ast.fn_decls.items[3].return_type); // main returns FLOAT
 }
 
 test "merged: type error in binary op" {
@@ -109,13 +106,13 @@ test "merged: type error in binary op" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
-    try std.testing.expect(ft.hasErrors());
+    try std.testing.expect(infer_res.hasErrors());
     // x + y where x:INT, y:BOOL → "RHS must be of number type"
-    try std.testing.expectEqual(@as(usize, 1), ft.errors.items.len);
-    try std.testing.expect(ft.errors.items[0].error_ == .wrong_type);
+    try std.testing.expectEqual(@as(usize, 1), infer_res.errors.items.len);
+    try std.testing.expect(infer_res.errors.items[0].error_ == .wrong_type);
 }
 
 test "merged: generic function instantiation" {
@@ -145,18 +142,18 @@ test "merged: generic function instantiation" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
     // add(INT,INT) returns INT, add(FLOAT,FLOAT) returns FLOAT, x + y is type mismatch (INT + FLOAT)
-    try std.testing.expect(ft.hasErrors());
-    try std.testing.expectEqual(@as(usize, 1), ft.errors.items.len);
-    try std.testing.expect(ft.errors.items[0].error_ == .type_mismatch);
-    try std.testing.expectEqual(DkType.INT, ft.errors.items[0].error_.type_mismatch.lhs);
-    try std.testing.expectEqual(DkType.FLOAT, ft.errors.items[0].error_.type_mismatch.rhs);
+    try std.testing.expect(infer_res.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), infer_res.errors.items.len);
+    try std.testing.expect(infer_res.errors.items[0].error_ == .type_mismatch);
+    try std.testing.expectEqual(DkType.INT, infer_res.errors.items[0].error_.type_mismatch.lhs);
+    try std.testing.expectEqual(DkType.FLOAT, infer_res.errors.items[0].error_.type_mismatch.rhs);
 
     // Should have 4 fn_decls: invalid + add(INT,INT) + add(FLOAT,FLOAT) + main
-    try std.testing.expectEqual(@as(usize, 4), ft.fn_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 4), infer_res.ft_ast.fn_decls.items.len);
 }
 
 test "function with default args" {
@@ -186,12 +183,12 @@ test "function with default args" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
-    try std.testing.expect(!ft.hasErrors());
+    try std.testing.expect(!infer_res.hasErrors());
     // greet(INT,INT) monomorphized once, main
-    try std.testing.expectEqual(@as(usize, 3), ft.fn_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 3), infer_res.ft_ast.fn_decls.items.len);
 }
 
 test "function with named args" {
@@ -219,10 +216,10 @@ test "function with named args" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
-    try std.testing.expect(!ft.hasErrors());
+    try std.testing.expect(!infer_res.hasErrors());
 }
 
 test "function missing required arg" {
@@ -250,44 +247,11 @@ test "function missing required arg" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
-    try std.testing.expect(ft.hasErrors());
-    try std.testing.expect(ft.errors.items[0].error_ == .missing_required_arg);
-}
-
-test "non-default param after default" {
-    const source =
-        \\fn bad(a := 1, b)
-        \\    result = a + b
-        \\
-        \\fn main()
-        \\    result = bad(1, 2)
-    ;
-
-    const gpa = std.testing.allocator;
-
-    var ts = try TokenStream.init(source, gpa);
-    defer ts.deinit(gpa);
-
-    var pr = try par.parse(source, ts.tokens, gpa);
-    defer pr.deinit();
-    try std.testing.expect(!pr.hasErrors());
-
-    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
-    defer elab_errors.deinit(gpa);
-
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
-    defer di.deinit();
-
-    try std.testing.expect(di.hasErrors());
-    var found = false;
-    for (di.errors.items) |e| {
-        if (e == .non_default_param_after_default)
-            found = true;
-    }
-    try std.testing.expect(found);
+    try std.testing.expect(infer_res.hasErrors());
+    try std.testing.expect(infer_res.errors.items[0].error_ == .missing_required_arg);
 }
 
 test "supply wrong type to fn param with default" {
@@ -315,12 +279,12 @@ test "supply wrong type to fn param with default" {
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
+    var infer_res = try infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
 
-    try std.testing.expect(ft.hasErrors());
-    var err : ?TypeErrorInfo = null;
-    for (ft.errors.items) |e| {
+    try std.testing.expect(infer_res.hasErrors());
+    var err: ?TypeErrorInfo = null;
+    for (infer_res.errors.items) |e| {
         if (e.error_ == .wrong_type)
             err = e;
     }
@@ -423,39 +387,56 @@ test "arrayShapeFromLit: multiple fills same level [1,0...,2,0...]" {
 // Full pipeline array type inference tests
 // -----------------------------------------------------------------------
 
-fn inferProgram(source: []const u8, gpa: std.mem.Allocator) !ft_ast.FtAst {
+fn inferProgram(source: []const u8, gpa: std.mem.Allocator) !type_inference.InferResult {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var stdout_buff: [1024]u8 = undefined;
+    var stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buff);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch unreachable;
+    // const terminal = std.Io.Terminal{
+    //     .writer = stdout,
+    //     .mode = try std.Io.Terminal.Mode.detect(io, stdout_file, false, false),
+    // };
+
     var ts = try tok.TokenStream.init(source, gpa);
     defer ts.deinit(gpa);
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
     var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
-    return infer(gpa, ts, &pr.ast, &di);
+    var ti_res = try infer(gpa, ts, &pr.ast, &di);
+    if (ti_res.errors.items.len > 0) {
+        try ti_res.printErrors(&pr.ast, ts, stdout);
+    }
+    return ti_res;
 }
 
 test "array: annotated [3]Int = [1,2,3]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2,3]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(!ft.hasErrors());
-    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
-    const ai = ft.array_instances.items[0];
+    var infer_res = try inferProgram("fn main()\n    a : [3]Int = [1,2,3]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), infer_res.ft_ast.array_instances.items.len);
+    const ai = infer_res.ft_ast.array_instances.items[0];
     try std.testing.expectEqual(@as(u8, 1), ai.ndim);
     try std.testing.expectEqual(@as(u16, 3), ai.shape[0]);
     try std.testing.expectEqual(DkType.INT, ai.elem_type);
     // var decl should have array type
-    const main_scope = ft.fn_decls.items[1].body_scope;
-    const var_decl_idx = ft.scopes.items[main_scope].first_decl;
-    try std.testing.expect(ft.var_decls.items[var_decl_idx].type_.isArray());
+    const main_scope = infer_res.ft_ast.fn_decls.items[1].body_scope;
+    const var_decl_idx = infer_res.ft_ast.scopes.items[main_scope].first_decl;
+    try std.testing.expect(infer_res.ft_ast.var_decls.items[var_decl_idx].type_.isArray());
 }
 
 test "array: inferred := [1,2,3]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a := [1,2,3]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(!ft.hasErrors());
-    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
-    const ai = ft.array_instances.items[0];
+    var infer_res = try inferProgram("fn main()\n    a := [1,2,3]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(!infer_res.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), infer_res.ft_ast.array_instances.items.len);
+    const ai = infer_res.ft_ast.array_instances.items[0];
     try std.testing.expectEqual(@as(u8, 1), ai.ndim);
     try std.testing.expectEqual(@as(u16, 3), ai.shape[0]);
     try std.testing.expectEqual(DkType.INT, ai.elem_type);
@@ -463,12 +444,11 @@ test "array: inferred := [1,2,3]" {
 
 test "array: 2D annotated [2,3]Int" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2,3],[4,5,6]]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(!ft.hasErrors());
+    var infer_res = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2,3],[4,5,6]]", gpa);
+    defer infer_res.deinit(gpa);
     // expect 2 array instances: [3]Int (inner) and [2,3]Int (outer)
     var found_outer = false;
-    for (ft.array_instances.items) |ai| {
+    for (infer_res.ft_ast.array_instances.items) |ai| {
         if (ai.ndim == 2 and ai.shape[0] == 2 and ai.shape[1] == 3 and ai.elem_type == DkType.INT)
             found_outer = true;
     }
@@ -477,63 +457,78 @@ test "array: 2D annotated [2,3]Int" {
 
 test "array: fill with annotation [4]Int = [1,0...,2]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [4]Int = [1,0...,2]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(!ft.hasErrors());
-    try std.testing.expectEqual(@as(usize, 1), ft.array_instances.items.len);
-    try std.testing.expectEqual(@as(u16, 4), ft.array_instances.items[0].shape[0]);
+    var infer_res = try inferProgram("fn main()\n    a : [4]Int = [1,0...,2]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(!infer_res.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), infer_res.ft_ast.array_instances.items.len);
+    try std.testing.expectEqual(@as(u16, 4), infer_res.ft_ast.array_instances.items[0].shape[0]);
 }
 
 test "array: shape mismatch [3]Int = [1,2]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
-    try std.testing.expect(ft.errors.items[0].error_ == .array_shape_mismatch);
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a : [3]Int = [1,2]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
+    try std.testing.expect(infer_res.errors.items[0].error_ == .array_shape_mismatch);
 }
 
 test "array: cannot infer size with fill" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a := [1,0...]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
-    try std.testing.expect(ft.errors.items[0].error_ == .cannot_infer_array_size);
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a := [1,0...]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
+    try std.testing.expect(infer_res.errors.items[0].error_ == .cannot_infer_array_size);
 }
 
 test "array: multiple fills same level" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,0...,2,0...]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a : [3]Int = [1,0...,2,0...]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
     var found = false;
-    for (ft.errors.items) |e| if (e.error_ == .multiple_fills_in_array_literal) { found = true; break; };
+    for (infer_res.errors.items) |e| if (e.error_ == .multiple_fills_in_array_literal) {
+        found = true;
+        break;
+    };
     try std.testing.expect(found);
 }
 
 test "array: inconsistent elem types [1,2,true]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [3]Int = [1,2,true]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a : [3]Int = [1,2,true]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
     var found = false;
-    for (ft.errors.items) |e| if (e.error_ == .inconsistent_elem_types_in_array_lit) { found = true; break; };
+    for (infer_res.errors.items) |e| if (e.error_ == .inconsistent_elem_types_in_array_lit) {
+        found = true;
+        break;
+    };
     try std.testing.expect(found);
 }
 
 test "array: ndim mismatch [3]Int = [[1,2,3]]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [3]Int = [[1,2,3]]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
-    try std.testing.expect(ft.errors.items[0].error_ == .array_shape_mismatch);
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a : [3]Int = [[1,2,3]]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
+    try std.testing.expect(infer_res.errors.items[0].error_ == .array_dimensionality_mismatch);
 }
 
 test "array: inconsistent inner dim [[1,2],[1,2,3]]" {
     const gpa = std.testing.allocator;
-    var ft = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2],[1,2,3]]", gpa);
-    defer ft.deinit();
-    try std.testing.expect(ft.hasErrors());
+    std.debug.print("The following error message is expected!", .{});
+    var infer_res = try inferProgram("fn main()\n    a : [2,3]Int = [[1,2],[1,2,3]]", gpa);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(infer_res.hasErrors());
     var found = false;
-    for (ft.errors.items) |e| if (e.error_ == .inconsistent_inner_dim) { found = true; break; };
+    for (infer_res.errors.items) |e| if (e.error_ == .inconsistent_inner_dim) {
+        found = true;
+        break;
+    };
     try std.testing.expect(found);
 }

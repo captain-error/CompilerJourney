@@ -1246,3 +1246,36 @@ test "resolve member access" {
     // so no error here (only base object 'c' is resolved).
     try std.testing.expect(!di.hasErrors());
 }
+
+test "resolver error: non-default param after default" {
+    const source =
+        \\fn bad(a := 1, b)
+        \\    result = a + b
+        \\
+        \\fn main()
+        \\    result = bad(1, 2)
+    ;
+
+    const gpa = std.testing.allocator;
+
+    var ts = try TokenStream.init(source, gpa);
+    defer ts.deinit(gpa);
+
+    var pr = try par.parse(source, ts.tokens, gpa);
+    defer pr.deinit();
+    try std.testing.expect(!pr.hasErrors());
+
+    var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
+    defer elab_errors.deinit(gpa);
+
+    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    defer di.deinit();
+
+    try std.testing.expect(di.hasErrors());
+    var found = false;
+    for (di.errors.items) |e| {
+        if (e == .non_default_param_after_default)
+            found = true;
+    }
+    try std.testing.expect(found);
+}

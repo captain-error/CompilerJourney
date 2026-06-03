@@ -1,6 +1,7 @@
 const std = @import("std");
 const tok = @import("tokenizer.zig");
 const par = @import("parser.zig");
+const test_util = @import("test_util.zig");
 
 const assert = std.debug.assert;
 
@@ -15,45 +16,8 @@ const Parser = par.Parser;
 const AstNodeIndex = par.AstNodeIndex;
 const AstNodeTag = par.AstNodeTag;
 
-fn testAstStructure(ast: *const AST) void {
-    for (1..ast.nodes.items.len) |i| {
-        const idx: AstNodeIndex = @intCast(i);
-        const node = ast.get(idx).*;
-        const num_kids = ast.countChildrenOf(idx);
-        switch (node.tag) {
-            // zig fmt: off
-            .INVALID          => unreachable,
-            .ASSIGNMENT       => assert(num_kids == 2),
-            .DECLARATION      => assert(num_kids >= 1 and num_kids <= 2), // [optional TYPE, optional rhs_expr]
-            .BINARY_OP        => assert(num_kids == 2),
-            .ATOM             => assert(num_kids == 0),
-            .IF               => assert(num_kids == 2 or num_kids == 3),
-            .WHILE            => assert(num_kids == 2),
-            .UNARY_OP         => assert(num_kids == 1),
-            .BLOCK            => {},
-            .DEFER            => assert(num_kids == 1), // statement or block
-            .CALL_OR_INST     => {},
-            .NAMED_ARG        => assert(num_kids == 1),
-            .FNPARAMS         => {},
-            .BREAK            => assert(num_kids == 0),
-            .CONTINUE         => assert(num_kids == 0),
-            .RETURN           => assert(num_kids == 1),
-            .FNDECL           => assert(num_kids == 2),
-            .STRUCTDECL       => {},
-            .MEMBER           => {assert(num_kids >= 0); assert(num_kids <= 2);},
-            .PARAM            => {assert(num_kids >= 0); assert(num_kids <= 2);},
-            .TYPE             => assert(num_kids == 0 or num_kids == 1), // 0: scalar, 1: array (ARRAY_SHAPE child)
-            .MEMBER_ACCESS    => assert(num_kids == 1),
-            .ARRAY_LIT        => {},
-            .FILL             => assert(num_kids == 1),
-            .ARRAY_SHAPE      => assert(num_kids >= 1),
-            .INFER_DIM        => assert(num_kids == 0),
-            .ARRAY_ACCESS     => assert(num_kids == 2),
-            .INDEX_ARGS       => assert(num_kids >= 1),
-            // zig fmt: on
-        }
-    }
-}
+const expectAstStructure = test_util.expectAstStructure;
+const testAstStructure = test_util.testAstStructure;
 
 test "parse function declaration" {
     const source =
@@ -81,8 +45,8 @@ test "parse function declaration 2" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a" },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a" },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -106,8 +70,8 @@ test "parse function declaration with default parameter values" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -131,8 +95,8 @@ test "parse function declaration with explicit types" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -156,8 +120,8 @@ test "parse function declaration with explicit types and default args" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "1" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -185,10 +149,10 @@ test "parse function declaration with complex params" {
         AstNodeTag.FNDECL, "add",
         .{
             AstNodeTag.FNPARAMS,
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "c", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "7" } },
-            .{AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "d", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Float" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b" },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "c", .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "7" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "d", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" }, .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" } },
         },
         .{
             AstNodeTag.BLOCK, .{
@@ -204,7 +168,7 @@ test "parse function declaration with complex params" {
 }
 
 test "parse mini program" {
-        const source =
+    const source =
         \\fn main()
         \\    jahr := 0
         \\    zins := 1.02
@@ -282,36 +246,34 @@ test "parse expression 4" {
     try testParser(source, Parser.parseExpression, expected, false);
 }
 
-
 test "correct operator associativity a - b + c" {
     const source =
         \\a - b + c
     ;
-    
+
     const expected = .{
         AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
-        .{ AstNodeTag.BINARY_OP, Token.Tag.MINUS, "-", 
-            .{ AstNodeTag.ATOM, "a" }, 
-            .{ AstNodeTag.ATOM, "b" },
-         },
+        .{
+            AstNodeTag.BINARY_OP,      Token.Tag.MINUS,           "-",
+            .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "b" },
+        },
         .{ AstNodeTag.ATOM, "c" },
     };
 
     try testParser(source, Parser.parseExpression, expected, false);
 }
 
-
 test "correct operator associativity a / b / c" {
     const source =
         \\a / b / c
     ;
-    
+
     const expected = .{
         AstNodeTag.BINARY_OP, Token.Tag.DIV, "/",
-        .{ AstNodeTag.BINARY_OP, Token.Tag.DIV, "/", 
-            .{ AstNodeTag.ATOM, "a" }, 
-            .{ AstNodeTag.ATOM, "b" },
-         },
+        .{
+            AstNodeTag.BINARY_OP,      Token.Tag.DIV,             "/",
+            .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "b" },
+        },
         .{ AstNodeTag.ATOM, "c" },
     };
 
@@ -322,13 +284,13 @@ test "correct operator associativity a / b * c" {
     const source =
         \\a / b * c
     ;
-    
+
     const expected = .{
         AstNodeTag.BINARY_OP, Token.Tag.TIMES, "*",
-        .{ AstNodeTag.BINARY_OP, Token.Tag.DIV, "/", 
-            .{ AstNodeTag.ATOM, "a" }, 
-            .{ AstNodeTag.ATOM, "b" },
-         },
+        .{
+            AstNodeTag.BINARY_OP,      Token.Tag.DIV,             "/",
+            .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "b" },
+        },
         .{ AstNodeTag.ATOM, "c" },
     };
 
@@ -598,7 +560,6 @@ test "AST vs reference" {
     try testParser(src, Parser.parseStatement, expected, false);
 }
 
-
 test "parse struct declaration" {
     const source =
         \\struct Car
@@ -608,11 +569,9 @@ test "parse struct declaration" {
         \\    name : Int = 42
     ;
     const expected = .{
-        AstNodeTag.STRUCTDECL, "Car",
-        .{ AstNodeTag.MEMBER, "velocity", .{ AstNodeTag.ATOM, "0.0" } },
-        .{ AstNodeTag.MEMBER, "gear", .{ AstNodeTag.TYPE, "Int" } },
-        .{ AstNodeTag.MEMBER, "some_val" },
-        .{ AstNodeTag.MEMBER, "name", .{ AstNodeTag.TYPE, "Int" }, .{ AstNodeTag.ATOM, "42" } },
+        AstNodeTag.STRUCTDECL,                                           "Car",
+        .{ AstNodeTag.MEMBER, "velocity", .{ AstNodeTag.ATOM, "0.0" } }, .{ AstNodeTag.MEMBER, "gear", .{ AstNodeTag.TYPE, "Int" } },
+        .{ AstNodeTag.MEMBER, "some_val" },                              .{ AstNodeTag.MEMBER, "name", .{ AstNodeTag.TYPE, "Int" }, .{ AstNodeTag.ATOM, "42" } },
     };
     try testParser(source, Parser.parseStructDecl, expected, false);
 }
@@ -620,9 +579,8 @@ test "parse struct declaration" {
 test "parse named args" {
     const source = "Car(gear=3, name=42)";
     const expected = .{
-        AstNodeTag.CALL_OR_INST, "Car",
-        .{ AstNodeTag.NAMED_ARG, "gear", .{ AstNodeTag.ATOM, "3" } },
-        .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
+        AstNodeTag.CALL_OR_INST,                                      "Car",
+        .{ AstNodeTag.NAMED_ARG, "gear", .{ AstNodeTag.ATOM, "3" } }, .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
     };
     try testParser(source, Parser.parseCallOrInst, expected, false);
 }
@@ -630,9 +588,8 @@ test "parse named args" {
 test "parse mixed positional and named args" {
     const source = "foo(1, 2, name=42)";
     const expected = .{
-        AstNodeTag.CALL_OR_INST, "foo",
-        .{ AstNodeTag.ATOM, "1" },
-        .{ AstNodeTag.ATOM, "2" },
+        AstNodeTag.CALL_OR_INST,                                       "foo",
+        .{ AstNodeTag.ATOM, "1" },                                     .{ AstNodeTag.ATOM, "2" },
         .{ AstNodeTag.NAMED_ARG, "name", .{ AstNodeTag.ATOM, "42" } },
     };
     try testParser(source, Parser.parseCallOrInst, expected, false);
@@ -641,9 +598,8 @@ test "parse mixed positional and named args" {
 test "parse member access read" {
     const source = "s.velocity + 1";
     const expected = .{
-        AstNodeTag.BINARY_OP, "+",
-        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "1" },
+        AstNodeTag.BINARY_OP,                                                 "+",
+        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } }, .{ AstNodeTag.ATOM, "1" },
     };
     try testParser(source, Parser.parseExpression, expected, false);
 }
@@ -651,7 +607,7 @@ test "parse member access read" {
 test "parse chained member access" {
     const source = "a.b.c";
     const expected = .{
-        AstNodeTag.MEMBER_ACCESS, "c",
+        AstNodeTag.MEMBER_ACCESS,                                      "c",
         .{ AstNodeTag.MEMBER_ACCESS, "b", .{ AstNodeTag.ATOM, "a" } },
     };
     try testParser(source, Parser.parseExpression, expected, false);
@@ -660,9 +616,8 @@ test "parse chained member access" {
 test "parse member assignment" {
     const source = "s.gear = 4\n";
     const expected = .{
-        AstNodeTag.BINARY_OP, "=",
-        .{ AstNodeTag.MEMBER_ACCESS, "gear", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "4" },
+        AstNodeTag.BINARY_OP,                                             "=",
+        .{ AstNodeTag.MEMBER_ACCESS, "gear", .{ AstNodeTag.ATOM, "s" } }, .{ AstNodeTag.ATOM, "4" },
     };
     try testParser(source, Parser.parseStatement, expected, false);
 }
@@ -670,9 +625,8 @@ test "parse member assignment" {
 test "parse member compound assignment" {
     const source = "s.velocity += 0.5\n";
     const expected = .{
-        AstNodeTag.BINARY_OP, "+=",
-        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } },
-        .{ AstNodeTag.ATOM, "0.5" },
+        AstNodeTag.BINARY_OP,                                                 "+=",
+        .{ AstNodeTag.MEMBER_ACCESS, "velocity", .{ AstNodeTag.ATOM, "s" } }, .{ AstNodeTag.ATOM, "0.5" },
     };
     try testParser(source, Parser.parseStatement, expected, false);
 }
@@ -680,9 +634,8 @@ test "parse member compound assignment" {
 test "parse typed declaration" {
     const source = "x : Int = 3\n";
     const expected = .{
-        AstNodeTag.DECLARATION, "x",
-        .{ AstNodeTag.TYPE, "Int" },
-        .{ AstNodeTag.ATOM, "3" },
+        AstNodeTag.DECLARATION,      "x",
+        .{ AstNodeTag.TYPE, "Int" }, .{ AstNodeTag.ATOM, "3" },
     };
     try testParser(source, Parser.parseStatement, expected, false);
 }
@@ -690,7 +643,7 @@ test "parse typed declaration" {
 test "parse declaration without type" {
     const source = "x := 3\n";
     const expected = .{
-        AstNodeTag.DECLARATION, "x",
+        AstNodeTag.DECLARATION,    "x",
         .{ AstNodeTag.ATOM, "3" },
     };
     try testParser(source, Parser.parseStatement, expected, false);
@@ -709,9 +662,8 @@ test "parse struct in program" {
     const expected = .{
         AstNodeTag.BLOCK,
         .{
-            AstNodeTag.STRUCTDECL, "Point",
-            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" } },
-            .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" } },
+            AstNodeTag.STRUCTDECL,                                      "Point",
+            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" } }, .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" } },
         },
         .{
             AstNodeTag.FNDECL, "main", .{AstNodeTag.FNPARAMS}, .{
@@ -719,15 +671,13 @@ test "parse struct in program" {
                 .{
                     AstNodeTag.DECLARATION, "p",
                     .{
-                        AstNodeTag.CALL_OR_INST, "Point",
-                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "1.0" } },
-                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "2.0" } },
+                        AstNodeTag.CALL_OR_INST,                                     "Point",
+                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "1.0" } }, .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "2.0" } },
                     },
                 },
                 .{
-                    AstNodeTag.BINARY_OP, "+=",
-                    .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
-                    .{ AstNodeTag.ATOM, "0.5" },
+                    AstNodeTag.BINARY_OP,                                          "+=",
+                    .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } }, .{ AstNodeTag.ATOM, "0.5" },
                 },
             },
         },
@@ -751,29 +701,29 @@ test "parse struct as function param" {
     const expected = .{
         AstNodeTag.BLOCK,
         .{
-            AstNodeTag.STRUCTDECL, "Point",
-            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
-            .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
+            AstNodeTag.STRUCTDECL,                                                                   "Point",
+            .{ AstNodeTag.MEMBER, "x", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } }, .{ AstNodeTag.MEMBER, "y", .{ AstNodeTag.TYPE, "Float" }, .{ AstNodeTag.ATOM, "0.0" } },
         },
         .{
-            AstNodeTag.FNDECL, "length", .{ AstNodeTag.FNPARAMS,
+            AstNodeTag.FNDECL, "length",
+            .{
+                AstNodeTag.FNPARAMS,
                 .{ AstNodeTag.PARAM, "p" },
-            }, .{
+            },
+            .{
                 AstNodeTag.BLOCK,
                 .{
-                    AstNodeTag.BINARY_OP, "=",
+                    AstNodeTag.BINARY_OP,           "=",
                     .{ AstNodeTag.ATOM, "result" },
                     .{
                         AstNodeTag.BINARY_OP, "+",
                         .{
-                            AstNodeTag.BINARY_OP, "*",
-                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
-                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
+                            AstNodeTag.BINARY_OP,                                          "*",
+                            .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } }, .{ AstNodeTag.MEMBER_ACCESS, "x", .{ AstNodeTag.ATOM, "p" } },
                         },
                         .{
-                            AstNodeTag.BINARY_OP, "*",
-                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
-                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
+                            AstNodeTag.BINARY_OP,                                          "*",
+                            .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } }, .{ AstNodeTag.MEMBER_ACCESS, "y", .{ AstNodeTag.ATOM, "p" } },
                         },
                     },
                 },
@@ -785,16 +735,15 @@ test "parse struct as function param" {
                 .{
                     AstNodeTag.DECLARATION, "pt",
                     .{
-                        AstNodeTag.CALL_OR_INST, "Point",
-                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "3.0" } },
-                        .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "4.0" } },
+                        AstNodeTag.CALL_OR_INST,                                     "Point",
+                        .{ AstNodeTag.NAMED_ARG, "x", .{ AstNodeTag.ATOM, "3.0" } }, .{ AstNodeTag.NAMED_ARG, "y", .{ AstNodeTag.ATOM, "4.0" } },
                     },
                 },
                 .{
-                    AstNodeTag.BINARY_OP, "=",
+                    AstNodeTag.BINARY_OP,           "=",
                     .{ AstNodeTag.ATOM, "result" },
                     .{
-                        AstNodeTag.CALL_OR_INST, "length",
+                        AstNodeTag.CALL_OR_INST,    "length",
                         .{ AstNodeTag.ATOM, "pt" },
                     },
                 },
@@ -830,12 +779,15 @@ test "parse typed 1D array declaration" {
     const source = "a : [3]Int = [1, 2, 3]\n";
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
             .{ AstNodeTag.ATOM, "1" },
             .{ AstNodeTag.ATOM, "2" },
             .{ AstNodeTag.ATOM, "3" },
@@ -848,12 +800,15 @@ test "parse inferred size array declaration" {
     const source = "a : [_]Int = [1, 2, 3]\n";
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.INFER_DIM, Token.Tag.UNDERSCORE, "_" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
             .{ AstNodeTag.ATOM, "1" },
             .{ AstNodeTag.ATOM, "2" },
             .{ AstNodeTag.ATOM, "3" },
@@ -867,7 +822,8 @@ test "parse 1D array access" {
     const expected = .{
         AstNodeTag.ARRAY_ACCESS,
         .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
-        .{ AstNodeTag.INDEX_ARGS,
+        .{
+            AstNodeTag.INDEX_ARGS,
             .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "0" },
         },
     };
@@ -879,7 +835,8 @@ test "parse 2D array access" {
     const expected = .{
         AstNodeTag.ARRAY_ACCESS,
         .{ AstNodeTag.ATOM, "a" },
-        .{ AstNodeTag.INDEX_ARGS,
+        .{
+            AstNodeTag.INDEX_ARGS,
             .{ AstNodeTag.ATOM, "1" },
             .{ AstNodeTag.ATOM, "2" },
         },
@@ -891,19 +848,24 @@ test "parse 2D typed array declaration" {
     const source = "a : [2,3]Int = [[1,2,3],[4,5,6]]\n";
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.ATOM, "2" },
                 .{ AstNodeTag.ATOM, "3" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
-            .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
+            .{
+                AstNodeTag.ARRAY_LIT,
                 .{ AstNodeTag.ATOM, "1" },
                 .{ AstNodeTag.ATOM, "2" },
                 .{ AstNodeTag.ATOM, "3" },
             },
-            .{ AstNodeTag.ARRAY_LIT,
+            .{
+                AstNodeTag.ARRAY_LIT,
                 .{ AstNodeTag.ATOM, "4" },
                 .{ AstNodeTag.ATOM, "5" },
                 .{ AstNodeTag.ATOM, "6" },
@@ -928,13 +890,16 @@ test "parse 2D array literal with row fill" {
     const source = "[[1,2,3], [0,0,0]...]";
     const expected = .{
         AstNodeTag.ARRAY_LIT,
-        .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
             .{ AstNodeTag.ATOM, "1" },
             .{ AstNodeTag.ATOM, "2" },
             .{ AstNodeTag.ATOM, "3" },
         },
-        .{ AstNodeTag.FILL,
-            .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.FILL,
+            .{
+                AstNodeTag.ARRAY_LIT,
                 .{ AstNodeTag.ATOM, "0" },
                 .{ AstNodeTag.ATOM, "0" },
                 .{ AstNodeTag.ATOM, "0" },
@@ -948,13 +913,16 @@ test "parse inferred 2D shape" {
     const source = "a : [_,_]Int = [[1,2],[3,4]]\n";
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.INFER_DIM, Token.Tag.UNDERSCORE, "_" },
                 .{ AstNodeTag.INFER_DIM, "_" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
             .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "1" }, .{ AstNodeTag.ATOM, "2" } },
             .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "3" }, .{ AstNodeTag.ATOM, "4" } },
         },
@@ -962,19 +930,21 @@ test "parse inferred 2D shape" {
     try testParser(source, Parser.parseStatement, expected, false);
 }
 
-
 test "parse inferred 3D shape" {
     const source = "a : [_,_,_]Int = [[[1,2],[3,4]], [[5,6],[7,8]]]\n";
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.INFER_DIM, "_" },
                 .{ AstNodeTag.INFER_DIM, "_" },
                 .{ AstNodeTag.INFER_DIM, "_" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
             .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "1" }, .{ AstNodeTag.ATOM, "2" } }, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "3" }, .{ AstNodeTag.ATOM, "4" } } },
             .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "5" }, .{ AstNodeTag.ATOM, "6" } }, .{ AstNodeTag.ARRAY_LIT, .{ AstNodeTag.ATOM, "7" }, .{ AstNodeTag.ATOM, "8" } } },
         },
@@ -984,49 +954,57 @@ test "parse inferred 3D shape" {
 
 test "parse complex 3D literal" {
     const source = "a : [3,2,4]Int = [[[1, 2...,], [3...,4]..., [5...]]..., [[6...]...]]\n";
-        
+
     const expected = .{
         AstNodeTag.DECLARATION, "a",
-        .{ AstNodeTag.TYPE, "Int",
-            .{ AstNodeTag.ARRAY_SHAPE,
+        .{
+            AstNodeTag.TYPE, "Int",
+            .{
+                AstNodeTag.ARRAY_SHAPE,
                 .{ AstNodeTag.ATOM, "3" },
                 .{ AstNodeTag.ATOM, "2" },
                 .{ AstNodeTag.ATOM, "4" },
             },
         },
-        .{ AstNodeTag.ARRAY_LIT,
-            .{ AstNodeTag.FILL,
-                .{ AstNodeTag.ARRAY_LIT,
-                    .{ AstNodeTag.ARRAY_LIT,
+        .{
+            AstNodeTag.ARRAY_LIT,
+            .{
+                AstNodeTag.FILL,
+                .{
+                    AstNodeTag.ARRAY_LIT,
+                    .{
+                        AstNodeTag.ARRAY_LIT,
                         .{ AstNodeTag.ATOM, "1" },
                         .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "2" } },
                     },
-                    .{ AstNodeTag.FILL,
-                        .{ AstNodeTag.ARRAY_LIT,
+                    .{
+                        AstNodeTag.FILL,
+                        .{
+                            AstNodeTag.ARRAY_LIT,
                             .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "3" } },
                             .{ AstNodeTag.ATOM, "4" },
                         },
                     },
-                    .{ AstNodeTag.ARRAY_LIT,
+                    .{
+                        AstNodeTag.ARRAY_LIT,
                         .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "5" } },
                     },
                 },
             },
-
-            .{ AstNodeTag.ARRAY_LIT,
-                .{ AstNodeTag.FILL,
-                    .{ AstNodeTag.ARRAY_LIT,
+            .{
+                AstNodeTag.ARRAY_LIT,
+                .{
+                    AstNodeTag.FILL,
+                    .{
+                        AstNodeTag.ARRAY_LIT,
                         .{ AstNodeTag.FILL, .{ AstNodeTag.ATOM, "6" } },
                     },
                 },
             },
-
         },
     };
     try testParser(source, Parser.parseStatement, expected, false);
 }
-
-
 
 test "parse struct with array member and fill" {
     const source =
@@ -1037,8 +1015,10 @@ test "parse struct with array member and fill" {
         AstNodeTag.STRUCTDECL, "S",
         .{
             AstNodeTag.MEMBER, "arr",
-            .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int",
-                .{ AstNodeTag.ARRAY_SHAPE,
+            .{
+                AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int",
+                .{
+                    AstNodeTag.ARRAY_SHAPE,
                     .{ AstNodeTag.ATOM, Token.Tag.INT_LIT, "3" },
                 },
             },
@@ -1060,8 +1040,10 @@ test "parse struct with array literal member" {
     const expected = .{
         AstNodeTag.BLOCK, .{
             AstNodeTag.STRUCTDECL, "S",
-            .{ AstNodeTag.MEMBER, "arr",
-                .{ AstNodeTag.ARRAY_LIT,
+            .{
+                AstNodeTag.MEMBER, "arr",
+                .{
+                    AstNodeTag.ARRAY_LIT,
                     .{ AstNodeTag.ATOM, "1" },
                     .{ AstNodeTag.ATOM, "2" },
                     .{ AstNodeTag.ATOM, "3" },
@@ -1071,7 +1053,6 @@ test "parse struct with array literal member" {
     };
     try testParser(source, Parser.parse, expected, false);
 }
-
 
 test "break inside while" {
     const source =
@@ -1124,9 +1105,8 @@ test "continue inside while" {
 test "equality chain with explicit parens (a == b) == c" {
     const source = "(a == b) == c";
     const expected = .{
-        AstNodeTag.BINARY_OP, Token.Tag.EQ, "==",
-        .{ AstNodeTag.BINARY_OP, Token.Tag.EQ, "==", .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "b" } },
-        .{ AstNodeTag.ATOM, "c" },
+        AstNodeTag.BINARY_OP,                                                                                Token.Tag.EQ,              "==",
+        .{ AstNodeTag.BINARY_OP, Token.Tag.EQ, "==", .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.ATOM, "b" } }, .{ AstNodeTag.ATOM, "c" },
     };
     try testParser(source, Parser.parseExpression, expected, false);
 }
@@ -1134,9 +1114,8 @@ test "equality chain with explicit parens (a == b) == c" {
 test "equality mixing with parens a == (b != c)" {
     const source = "a == (b != c)";
     const expected = .{
-        AstNodeTag.BINARY_OP, Token.Tag.EQ, "==",
-        .{ AstNodeTag.ATOM, "a" },
-        .{ AstNodeTag.BINARY_OP, Token.Tag.NOT_EQ, "!=", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "c" } },
+        AstNodeTag.BINARY_OP,      Token.Tag.EQ,                                                                                            "==",
+        .{ AstNodeTag.ATOM, "a" }, .{ AstNodeTag.BINARY_OP, Token.Tag.NOT_EQ, "!=", .{ AstNodeTag.ATOM, "b" }, .{ AstNodeTag.ATOM, "c" } },
     };
     try testParser(source, Parser.parseExpression, expected, false);
 }
@@ -1165,9 +1144,7 @@ test "parse assignment with member and array access" {
     try testParser(source, Parser.parseStatement, expected, false);
 }
 
-
 //--------------------------------------------------------------------------
-
 
 /// Returns true if the passed type will coerce to []const u8.
 /// Any of the following are considered strings:
@@ -1213,92 +1190,6 @@ pub fn isZigString(comptime T: type) bool {
     };
 }
 
-fn expectAstStructure(
-    ast: *const AST,
-    ts: *const TokenStream,
-    writer: *std.Io.Writer,
-    ast_idx: AstNodeIndex,
-    nesting_depth: usize, // only used for error reporting
-    expected: anytype,
-) !void {
-    if (ast_idx == 0) {
-        try writer.splatByteAll(' ', nesting_depth * 4);
-        try writer.print("ast_idx is 0. Expected: {any}\n", .{expected});
-        return error.WrongNodeType;
-    }
-
-    if (expected.len == 0)
-        return; // nothing to expect, ignore everything.
-
-    const node = ast.get(ast_idx).*;
-    const token = ts.tokens[node.token_index];
-    var child_list = node.children(ast);
-
-    inline for (expected) |e| {
-        if (@TypeOf(e) == @TypeOf(null)) {
-            return; // ignore the rest, everything before matched!
-        } else if (@TypeOf(e) == AstNodeTag) {
-            if (node.tag != e) {
-                try writer.splatByteAll(' ', nesting_depth * 4);
-                try writer.print("expected AST node {s} but found {s} ({s}[{s}])\n", .{ @tagName(e), @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
-                return error.WrongNodeType;
-            }
-        } else if (@TypeOf(e) == Token.Tag) {
-            if (token.tag != e) {
-                try writer.splatByteAll(' ', nesting_depth * 4);
-                try writer.print("expected token {s} but found {s} ({s}[{s}])\n", .{ @tagName(e), @tagName(token.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
-                return error.WrongTokenTag;
-            }
-        } else {
-            const e_type_info = @typeInfo(@TypeOf(e));
-            switch (e_type_info) {
-                .array => unreachable,
-                .pointer => |p| {
-                    // @compileLog(e, p, p.child, @typeInfo(p.child));
-                    assert(p.size == .one);
-                    // @compileLog(e, p.child, @typeInfo(p.child));
-                    assert(@typeInfo(p.child) == .array);
-                    assert(@typeInfo(p.child).array.child == u8);
-                    const expected_token_str = e;
-                    if (!std.mem.eql(u8, token.str(ts.source), expected_token_str)) {
-                        try writer.splatByteAll(' ', nesting_depth * 4);
-                        try writer.print("expected token string {s} but found {s}\n", .{ expected_token_str, token.str(ts.source) });
-                        return error.StringMismatch;
-                    }
-                },
-                .@"struct" => {
-                    assert(e_type_info.@"struct".is_tuple);
-                    // recursively check child:
-                    const expected_child = e;
-                    if (child_list.nextIdx()) |child_idx| {
-                        expectAstStructure(ast, ts, writer, child_idx, nesting_depth + 1, expected_child) catch |err| {
-                            try writer.splatByteAll(' ', nesting_depth * 4);
-                            try writer.print("{s} ({s}[{s}]))\n", .{ @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(ts.source) });
-                            return err;
-                        };
-                    } else {
-                        // report that expected child is missing.
-                        try writer.splatByteAll(' ', nesting_depth * 4);
-                        try writer.print("child missing. Expected: {any}\n", .{expected_child});
-                        return error.ChildMissing;
-                    }
-                },
-                else => unreachable,
-            } // switch e_type_info
-        }
-    } // for expected
-
-    if (child_list.nextIdx()) |extra_child_idx| {
-        // report that there are more children than expected.
-        try writer.splatByteAll(' ', nesting_depth * 4);
-        try writer.print("extra child found: AST idx: {}", .{extra_child_idx});
-        try writer.print("({s})\n", .{@tagName(ast.get(extra_child_idx).tag)});
-        return error.ExtraChild;
-    }
-
-    return; // everything matched!
-}
-
 // fn (parser: *Parser) Parser.InternalParserError!AstNodeIndex
 fn testParser(source: []const u8, parse_func: anytype, expected_structure: anytype, print_always: bool) !void {
     const gpa = std.testing.allocator;
@@ -1340,7 +1231,6 @@ fn testParser(source: []const u8, parse_func: anytype, expected_structure: anyty
 
         return err;
     };
-    
 
     if (ast_idx == 0 or parser.hasErrors() or print_always) {
         try stdout.writeAll("All tokens:\n");
@@ -1390,19 +1280,5 @@ fn testParser(source: []const u8, parse_func: anytype, expected_structure: anyty
         return err;
     };
 
-    // try ts.prettyPrintTokens(stdout);
-    // try stdout.writeAll("-----------------------\n\n");
-
-    // try parser.printErrors(stdout, ts);
-
-    // try stdout.writeAll("\n\nAST:\n");
-    // try parser.printAstBranch(stdout, ast_idx, 1);
-
-    // try stdout.writeAll("\n--- all AST nodes:\n");
-    // for (parser.ast.nodes.items) |node| {
-    //     const token = ts.tokens[node.token_index];
-    //     try stdout.print("{s} ({s}[{s}]) ", .{ @tagName(node.tag), @tagName(token.tag), if (token.tag == .EOL) "\\n" else token.str(source) });
-    // }
-    // try stdout.writeAll("\n---------------\n");
     try stdout.flush();
 }

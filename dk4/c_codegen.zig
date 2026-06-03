@@ -934,13 +934,14 @@ fn runCompilerAndCompareOutput(source: []const u8, expected_c: []const u8) !void
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
-    var ft = try type_inference.infer(gpa, ts, &pr.ast, &di);
-    defer ft.deinit();
-    try std.testing.expect(!ft.hasErrors());
+    var infer_res = try type_inference.infer(gpa, ts, &pr.ast, &di);
+    defer infer_res.deinit(gpa);
+    try std.testing.expect(!infer_res.hasErrors());
 
     var aw: Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    try CCodegen.generate(&aw.writer, &ft, gpa);
+
+    try CCodegen.generate(&aw.writer, &infer_res.ft_ast, gpa);
     try aw.writer.flush();
 
     const c_out = aw.written();
@@ -996,10 +997,14 @@ test "generate C with correct oprerator precedence and associativity" {
     try runCompilerAndCompareOutput(source, expected);
 }
 
-test "generate C output simple defer" {
+test "generate C with defer" {
     const source =
         \\fn main()
         \\    x := 3.0
+        \\    if x < 10.0
+        \\        x -= 0.1
+        \\        defer x += 0.2
+        \\        x += 1.0
         \\    defer a := 2
         \\    defer b := 3
         \\    result = x + 1.0;
@@ -1017,15 +1022,22 @@ test "generate C output simple defer" {
         \\int main(void) {
         \\    double result;
         \\    double x = 3e0;
-        \\    result = x + 1e0;
-        \\    _dk_defer__0_3: {
-        \\        int64_t b = 3;
-        \\    }
-        \\    _dk_defer__0_2: {
-        \\        int64_t a = 2;
-        \\    }
-        \\    printf("%.6f\n", result);
-        \\    return 0;
+        \\     if (x < 1e1) {
+        \\         x -= 1e-1;
+        \\         x += 1e0;
+        \\         _dk_defer__1_4: {
+        \\             x += 2e-1;
+        \\         }
+        \\     }
+        \\         result = x + 1e0;
+        \\     _dk_defer__0_7: {
+        \\         int64_t b = 3;
+        \\     }
+        \\     _dk_defer__0_6: {
+        \\         int64_t a = 2;
+        \\     }
+        \\     printf("%.6f\n", result);
+        \\     return 0;
         \\}
     ;
 
