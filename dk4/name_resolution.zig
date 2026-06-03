@@ -144,6 +144,115 @@ pub const DeclInfo = struct {
         const decl = &di.declarations[@intFromEnum(idx)];
         return ts.tokens[decl.name_token_idx].str(ts.source);
     }
+
+    pub fn printErrors(di: *const DeclInfo, ast: *const AST, ts: TokenStream, writer: *std.Io.Writer) !void {
+        for (di.errors.items) |err| {
+            switch (err) {
+                .undecl_var => |token_idx| {
+                    const pos = try ts.printLineAndMarkToken(writer, token_idx);
+                    try writer.print("line {}: Error: undeclared variable '{s}'.\n\n", .{ pos.line, ts.sourceStr(token_idx) });
+                },
+                .undecl_type => |token_idx| {
+                    const pos = try ts.printLineAndMarkToken(writer, token_idx);
+                    try writer.print("line {}: Error: undeclared type '{s}'.\n\n", .{ pos.line, ts.sourceStr(token_idx) });
+                },
+                .multi_decl_var => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
+                    const first_line = ts.token_lines[e.first_decl];
+                    try writer.print("line {}: Error: duplicate variable declaration '{s}'. First declared at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.error_decl), first_line,
+                    });
+                },
+                .multi_decl_fn => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
+                    const first_line = ts.token_lines[e.first_decl];
+                    try writer.print("line {}: Error: duplicate function definition '{s}'. First defined at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.error_decl), first_line,
+                    });
+                },
+                .decl_shadows_outer => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
+                    const outer_line = ts.token_lines[e.outer_decl];
+                    try writer.print("line {}: Error: '{s}' shadows outer declaration at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.error_decl), outer_line,
+                    });
+                },
+                .unknown_function => |node_idx| {
+                    const node = ast.get(node_idx);
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, node_idx, null);
+                    try writer.print("line {}: Error: unknown function '{s}'.\n\n", .{
+                        pos.line, ts.sourceStr(node.token_index),
+                    });
+                },
+                .symbol_is_not_a_function => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.call);
+                    try writer.print("line {}: Error: '{s}' is not a function.\n\n", .{
+                        pos.line, ts.sourceStr(e.call),
+                    });
+                },
+                .symbol_is_not_a_variable_but_function => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.usage);
+                    try writer.print("line {}: Error: '{s}' is a function and cannot be used as a variable.\n\n", .{
+                        pos.line, ts.sourceStr(e.usage),
+                    });
+                },
+                .redeclaration_of_result_var => |token_idx| {
+                    const pos = try ts.printLineAndMarkToken(writer, token_idx);
+                    try writer.print("line {}: Error: 'result' is reserved and cannot be redeclared.\n\n", .{
+                        pos.line,
+                    });
+                },
+                .param_shadows_global => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.param_decl);
+                    const global_line = ts.token_lines[e.global_decl];
+                    try writer.print("line {}: Error: parameter '{s}' shadows global declaration at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.param_decl), global_line,
+                    });
+                },
+                .function_parameters_have_same_name => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.second_param);
+                    try writer.print("line {}: Error: duplicate parameter name '{s}'.\n\n", .{
+                        pos.line, ts.sourceStr(e.second_param),
+                    });
+                },
+                .duplicate_struct_member => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
+                    const first_line = ts.token_lines[e.first_decl];
+                    try writer.print("line {}: Error: duplicate struct member '{s}'. First declared at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.error_decl), first_line,
+                    });
+                },
+                .struct_name_shadows => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.error_decl);
+                    const first_line = ts.token_lines[e.first_decl];
+                    try writer.print("line {}: Error: struct name '{s}' shadows declaration at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.error_decl), first_line,
+                    });
+                },
+                .default_must_be_literal => |token_idx| {
+                    const pos = try ts.printLineAndMarkToken(writer, token_idx);
+                    try writer.print("line {}: Error: default value must be a literal.\n\n", .{
+                        pos.line,
+                    });
+                },
+                .non_default_param_after_default => |e| {
+                    const pos = try ts.printLineAndMarkToken(writer, e.param);
+                    const default_line = ts.token_lines[e.first_default];
+                    try writer.print("line {}: Error: non-default parameter '{s}' follows default parameter at line {}.\n\n", .{
+                        pos.line, ts.sourceStr(e.param), default_line,
+                    });
+                },
+                .valueless_decl_outside_struct => |token_idx| {
+                    const pos = try ts.printLineAndMarkToken(writer, token_idx);
+                    try writer.print("line {}: Error: variable declaration with type but no value is only allowed inside a struct.\n\n", .{
+                        pos.line,
+                    });
+                },
+            }
+        }
+
+        try writer.flush();
+    }
 };
 
 // -----------------------------------------------------------------------
@@ -932,6 +1041,14 @@ pub fn resolve(
 // Tests
 // -----------------------------------------------------------------------
 
+fn printDiErrors(di: *const DeclInfo, ast: *const AST, ts: TokenStream, gpa: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.File.stdout().writer(threaded.io(), &buf);
+    try di.printErrors(ast, ts, &w.interface);
+}
+
 test "resolve simple program" {
     const gpa = std.testing.allocator;
     const source =
@@ -953,6 +1070,7 @@ test "resolve simple program" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(!di.hasErrors());
     // Should have 1 function template (main) at index 1
     try std.testing.expectEqual(@as(usize, 2), di.fn_templates.items.len); // [0]=null, [1]=main
@@ -978,6 +1096,7 @@ test "resolve undeclared variable" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     try std.testing.expectEqual(@as(usize, 1), di.errors.items.len);
     try std.testing.expect(di.errors.items[0] == .undecl_var);
@@ -1004,6 +1123,7 @@ test "resolve duplicate variable" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     try std.testing.expectEqual(@as(usize, 1), di.errors.items.len);
     try std.testing.expect(di.errors.items[0] == .multi_decl_var);
@@ -1032,6 +1152,7 @@ test "resolve function call" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(!di.hasErrors());
     try std.testing.expectEqual(@as(usize, 3), di.fn_templates.items.len); // [0]=null, [1]=add, [2]=main
 }
@@ -1060,6 +1181,7 @@ test "resolve struct declaration" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(!di.hasErrors());
     try std.testing.expectEqual(@as(usize, 2), di.struct_templates.items.len); // [0]=null, [1]=Car
     const car = di.struct_templates.items[1];
@@ -1091,6 +1213,7 @@ test "resolve struct with generic member" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(!di.hasErrors());
     const pair = di.struct_templates.items[1];
     try std.testing.expectEqual(@as(u8, 2), pair.member_count);
@@ -1121,6 +1244,7 @@ test "resolve struct instantiation" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(!di.hasErrors());
     // The CALL_OR_INST for Car should resolve to the struct declaration
     var found_car_call = false;
@@ -1161,6 +1285,7 @@ test "resolve duplicate struct member" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     try std.testing.expect(di.errors.items[0] == .duplicate_struct_member);
 }
@@ -1190,6 +1315,7 @@ test "resolve shadowing error" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     try std.testing.expect(di.errors.items[0] == .decl_shadows_outer);
 }
@@ -1214,6 +1340,7 @@ test "resolve unknown function" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     try std.testing.expect(di.errors.items[0] == .unknown_function);
 }
@@ -1242,6 +1369,7 @@ test "resolve member access" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
     // Member access field resolution is deferred to type inference,
     // so no error here (only base object 'c' is resolved).
     try std.testing.expect(!di.hasErrors());
@@ -1271,6 +1399,7 @@ test "resolver error: non-default param after default" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
+    try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     var found = false;
     for (di.errors.items) |e| {
