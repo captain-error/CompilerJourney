@@ -63,6 +63,8 @@ pub const AstNodeTag = enum(u8) {
     FNPARAMS, // arbitrary many children
     PARAM, // token_index = param name IDENT. children: [optional TYPE, optional default value]
     RETURN, // 1 child: return value (expression)
+    BREAK, // 0 children
+    CONTINUE, // 0 children
     CALL_OR_INST, // N children: positional exprs and/or NAMED_ARGs. Python-style: after first named, all must be named.
     NAMED_ARG, // token_index = field name IDENT. 1 child: value expression.
     WHILE, // 2 children: condition, body
@@ -175,10 +177,10 @@ pub const Parser = struct {
         p.token_idx += 1;
     }
 
-    fn skip(p: *Parser, tags : anytype) void {
+    fn skip(p: *Parser, tags: anytype) void {
         var skipped = true;
 
-        while(skipped)        {
+        while (skipped) {
             skipped = false;
             inline for (tags) |tag| {
                 if (p.peek(0).tag == tag) {
@@ -251,7 +253,7 @@ pub const Parser = struct {
             .OR => 2,
             .XOR => 3,
             .AND => 4,
-            .GT, .GE, .LT, .LE => 5,
+            .GT, .GE, .LT, .LE, .EQ, .NOT_EQ => 5,
             .PLUS, .MINUS => 6,
             .TIMES, .DIV => 7,
             .POW => 8,
@@ -260,7 +262,7 @@ pub const Parser = struct {
     }
 
     fn isRightAssociative(tag: Token.Tag) bool {
-        return switch(tag) {
+        return switch (tag) {
             .ASSIGN, .PLUSASSIGN, .MINUSASSIGN, .MULTASSIGN, .DIVASSIGN => true,
             .POW => true,
             else => false,
@@ -299,26 +301,24 @@ pub const Parser = struct {
         }
     }
 
-
     pub fn parseFnDecl(p: *Parser) InternalParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .FN);
         p.next();
 
-        if (!try p.expectToken(.IDENTIFIER)) 
+        if (!try p.expectToken(.IDENTIFIER))
             return error.UnexpectedToken;
-        
+
         const name_token_idx = p.token_idx;
         p.next();
 
         if (!try p.expectToken(.LPAREN))
-             return error.UnexpectedToken;
-       
+            return error.UnexpectedToken;
 
         const node_idx = try p.ast.append(.{
             .tag = .FNDECL,
             .token_index = name_token_idx,
         });
-    
+
         const params_idx = try p.ast.append(.{
             .tag = .FNPARAMS,
             .token_index = p.token_idx, // not really needed, points to the opening parenthesis token
@@ -341,14 +341,14 @@ pub const Parser = struct {
         while (p.peek(0).tag != .RPAREN) {
             // FIXME! only allow balanced BEGIN_BLOCK/END_BLOCK
 
-            p.skip(.{ .EOL });
-            
-            if (!try p.expectToken(.IDENTIFIER)) 
+            p.skip(.{.EOL});
+
+            if (!try p.expectToken(.IDENTIFIER))
                 return error.UnexpectedToken;
             const param_idx = try p.parseStructMemberOrParam(.PARAM);
             try param_list.appendExisting(param_idx);
 
-            p.skip(.{ .EOL });
+            p.skip(.{.EOL});
 
             if (p.peek(0).tag != .COMMA) break;
             p.next();
@@ -381,6 +381,36 @@ pub const Parser = struct {
 
         const expr_idx = try p.parseExpression();
         p.ast.get(node_idx).first_child = expr_idx;
+
+        if (!try p.expectEndOfStatement())
+            return error.UnexpectedToken;
+        p.next();
+
+        return node_idx;
+    }
+
+    pub fn parseBreak(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .BREAK);
+        const node_idx = try p.ast.append(.{
+            .tag = .BREAK,
+            .token_index = p.token_idx,
+        });
+        p.next();
+
+        if (!try p.expectEndOfStatement())
+            return error.UnexpectedToken;
+        p.next();
+
+        return node_idx;
+    }
+
+    pub fn parseContinue(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .CONTINUE);
+        const node_idx = try p.ast.append(.{
+            .tag = .CONTINUE,
+            .token_index = p.token_idx,
+        });
+        p.next();
 
         if (!try p.expectEndOfStatement())
             return error.UnexpectedToken;
@@ -504,7 +534,7 @@ pub const Parser = struct {
     ///   x : = expr       --> MEMBER/PARAM(x), children: [expr]
     ///   x : Type = expr  --> MEMBER/PARAM(x), children: [TYPE(Type), expr]
     ///   x : Type         --> MEMBER/PARAM(x), children: [TYPE(Type)]
-    fn parseStructMemberOrParam(p: *Parser, tag : AstNodeTag) InternalParserError!AstNodeIndex {
+    fn parseStructMemberOrParam(p: *Parser, tag: AstNodeTag) InternalParserError!AstNodeIndex {
         if (!try p.expectToken(.IDENTIFIER))
             return error.UnexpectedToken;
 
@@ -521,7 +551,7 @@ pub const Parser = struct {
             try p.emitError(p.token_idx, "':'");
             return error.UnexpectedToken;
         }
-        
+
         if (p.peek(0).tag == .COLON) {
             p.next();
             switch (p.peek(0).tag) {
@@ -575,7 +605,7 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             }
             const dim_idx = blk: {
-                if(!try p.expectOneOf(.{ .UNDERSCORE, .INT_LIT }, "int literal or '_'"))
+                if (!try p.expectOneOf(.{ .UNDERSCORE, .INT_LIT }, "int literal or '_'"))
                     return error.UnexpectedToken;
 
                 switch (p.peek(0).tag) {
@@ -599,7 +629,7 @@ pub const Parser = struct {
         if (!try p.expectToken(.RBRACKET))
             return error.UnexpectedToken;
         p.next(); // consume ]
-        
+
         p.ast.get(shape_idx).first_child = dim_list.start_index;
 
         const type_idx = try p.parseScalarType();
@@ -615,7 +645,7 @@ pub const Parser = struct {
 
     pub fn parseExpression(p: *Parser) InternalParserError!AstNodeIndex {
         // adapted from https://en.wikipedia.org/wiki/Operator-precedence_parser
-        
+
         const lhs = try p.parseSubExpr();
         return p.parseExpression1(lhs, 1);
     }
@@ -624,16 +654,18 @@ pub const Parser = struct {
         assert(min_precedence > 0);
         var lhs = lhs_;
         while (true) {
-            const op_precedence = precedenceOf(p.peek(0).tag); // will return 0 if the token is not an operator
-            if(op_precedence < min_precedence) // FIXME for == and != and which can only apear once (cannot be chained) this should be "<=" instead of "<"
+            const op_tag = p.peek(0).tag;
+            const op_precedence = precedenceOf(op_tag); // will return 0 if the token is not an operator
+            if (op_precedence < min_precedence)
                 break;
+            // FIXME: == and != should get special tratment at some point
             const op = p.token_idx;
             p.next();
             var rhs = try p.parseSubExpr();
 
-            while(true) {
+            while (true) {
                 const precedence = precedenceOf(p.peek(0).tag);
-                if (precedence <= op_precedence and ! (precedence == op_precedence and isRightAssociative(p.peek(0).tag)))
+                if (precedence <= op_precedence and !(precedence == op_precedence and isRightAssociative(p.peek(0).tag)))
                     break;
                 rhs = try p.parseExpression1(rhs, op_precedence + @intFromBool(precedence > op_precedence));
             }
@@ -644,12 +676,10 @@ pub const Parser = struct {
             });
             p.ast.get(lhs).next_sibling = rhs;
             lhs = binop_idx;
-            
         }
 
         return lhs;
     }
-
 
     fn parseArrayLiteral(p: *Parser) InternalParserError!AstNodeIndex {
         assert(p.peek(0).tag == .LBRACKET);
@@ -827,8 +857,6 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-       
-
         return node_idx;
     }
 
@@ -906,13 +934,13 @@ pub const Parser = struct {
 
     fn parseDefer(p: *Parser) ParserError!AstNodeIndex {
         std.debug.assert(p.peek(0).tag == .DEFER);
-        const node_idx = try p.ast.append(.{ 
-            .token_index = p.token_idx, 
+        const node_idx = try p.ast.append(.{
+            .token_index = p.token_idx,
             .tag = .DEFER,
-            });
+        });
         p.next();
 
-        if(p.peek(0).tag == .BEGIN_BLOCK) {
+        if (p.peek(0).tag == .BEGIN_BLOCK) {
             const block_idx = try p.parseIndentedCodeBlock();
             p.ast.get(node_idx).first_child = block_idx;
         } else {
@@ -931,6 +959,8 @@ pub const Parser = struct {
             .IF         => res = p.parseIf(),
             .WHILE      => res = p.parseWhile(),
             .RETURN     => res = p.parseReturn(),
+            .BREAK      => res = p.parseBreak(),
+            .CONTINUE   => res = p.parseContinue(),
             .FN         => res = p.parseFnDecl(),
             .STRUCT     => res = p.parseStructDecl(),
             .DEFER      => res = p.parseDefer(),
@@ -1082,7 +1112,7 @@ pub const Parser = struct {
     }
 };
 
-pub fn getFirstAndLastTokenOfAstBranch(ast_index: AstNodeIndex, ast : *const AST) struct{first:TokenIndex, last:TokenIndex} {
+pub fn getFirstAndLastTokenOfAstBranch(ast_index: AstNodeIndex, ast: *const AST) struct { first: TokenIndex, last: TokenIndex } {
     assert(ast_index != 0);
 
     const node = ast.get(ast_index);
@@ -1098,14 +1128,14 @@ pub fn getFirstAndLastTokenOfAstBranch(ast_index: AstNodeIndex, ast : *const AST
             assert(child_res.first <= child_res.last);
 
             first_token_idx = @min(first_token_idx, child_res.first);
-            last_token_idx  = @max(last_token_idx, child_res.last);
+            last_token_idx = @max(last_token_idx, child_res.last);
         }
     }
 
     return .{ .first = first_token_idx, .last = last_token_idx };
 }
 
-pub fn printAstBranch(writer: *std.Io.Writer, ast_index: AstNodeIndex, ast : *const AST, tokens : []const Token, source : []const u8, indentation: usize) !void {
+pub fn printAstBranch(writer: *std.Io.Writer, ast_index: AstNodeIndex, ast: *const AST, tokens: []const Token, source: []const u8, indentation: usize) !void {
     try writer.splatByteAll(' ', 4 * indentation);
 
     if (ast_index == 0) {
@@ -1131,8 +1161,7 @@ pub fn printAstBranch(writer: *std.Io.Writer, ast_index: AstNodeIndex, ast : *co
     }
 }
 
-
-pub fn debugPrintAstBranch(ast_index: AstNodeIndex, ast : *const AST, tokens : []const Token, source : []const u8) void {
+pub fn debugPrintAstBranch(ast_index: AstNodeIndex, ast: *const AST, tokens: []const Token, source: []const u8) void {
     var buffer: [64]u8 = undefined;
     const bw = std.debug.lockStderrWriter(&buffer);
     defer std.debug.unlockStderrWriter();

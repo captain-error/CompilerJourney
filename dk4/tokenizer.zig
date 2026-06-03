@@ -61,6 +61,9 @@ pub const Token = struct {
         MINUSASSIGN,
 
         UNDERSCORE,
+
+        BREAK,
+        CONTINUE,
         DEFER,
 
         IF,
@@ -335,21 +338,23 @@ pub const Tokenizer = struct {
             // + implement simple comparison function which takes a compime string literal
 
             // zig fmt: off
-            if (std.mem.eql(u8, "_"     , word)) return t.emit(.UNDERSCORE, len);
-            if (std.mem.eql(u8, "or"    , word)) return t.emit(.OR        , len);
-            if (std.mem.eql(u8, "if"    , word)) return t.emit(.IF        , len);
-            if (std.mem.eql(u8, "fn"    , word)) return t.emit(.FN        , len);
-            if (std.mem.eql(u8, "and"   , word)) return t.emit(.AND       , len);
-            if (std.mem.eql(u8, "not"   , word)) return t.emit(.NOT       , len);
-            if (std.mem.eql(u8, "xor"   , word)) return t.emit(.XOR       , len);
-            if (std.mem.eql(u8, "else"  , word)) return t.emit(.ELSE      , len);
-            if (std.mem.eql(u8, "true"  , word)) return t.emit(.TRUE      , len);
-            if (std.mem.eql(u8, "false" , word)) return t.emit(.FALSE     , len);
-            if (std.mem.eql(u8, "defer" , word)) return t.emit(.DEFER     , len);
-            if (std.mem.eql(u8, "while" , word)) return t.emit(.WHILE     , len);
-            if (std.mem.eql(u8, "struct", word)) return t.emit(.STRUCT    , len);
-            if (std.mem.eql(u8, "return", word)) return t.emit(.RETURN    , len);
-                                                         return t.emit(.IDENTIFIER, len);
+            if (std.mem.eql(u8, "_"       , word)) return t.emit(.UNDERSCORE , len);
+            if (std.mem.eql(u8, "or"      , word)) return t.emit(.OR         , len);
+            if (std.mem.eql(u8, "if"      , word)) return t.emit(.IF         , len);
+            if (std.mem.eql(u8, "fn"      , word)) return t.emit(.FN         , len);
+            if (std.mem.eql(u8, "and"     , word)) return t.emit(.AND        , len);
+            if (std.mem.eql(u8, "not"     , word)) return t.emit(.NOT        , len);
+            if (std.mem.eql(u8, "xor"     , word)) return t.emit(.XOR        , len);
+            if (std.mem.eql(u8, "else"    , word)) return t.emit(.ELSE       , len);
+            if (std.mem.eql(u8, "true"    , word)) return t.emit(.TRUE       , len);
+            if (std.mem.eql(u8, "false"   , word)) return t.emit(.FALSE      , len);
+            if (std.mem.eql(u8, "while"   , word)) return t.emit(.WHILE      , len);
+            if (std.mem.eql(u8, "defer"   , word)) return t.emit(.DEFER      , len);
+            if (std.mem.eql(u8, "break"   , word)) return t.emit(.BREAK      , len);
+            if (std.mem.eql(u8, "struct"  , word)) return t.emit(.STRUCT     , len);
+            if (std.mem.eql(u8, "return"  , word)) return t.emit(.RETURN     , len);
+            if (std.mem.eql(u8, "continue", word)) return t.emit(.CONTINUE   , len);
+                                                            return t.emit(.IDENTIFIER, len);
             // zig fmt: on
 
         }
