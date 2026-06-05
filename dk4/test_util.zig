@@ -38,6 +38,10 @@ pub fn testAstStructure(ast: *const AST) void {
             .BREAK            => assert(num_kids == 0),
             .CONTINUE         => assert(num_kids == 0),
             .RETURN           => assert(num_kids == 1),
+            .FOR              => {}, // FOR_INIT? → FOR_COND? → FOR_INCR? → BLOCK
+            .FOR_INIT         => assert(num_kids == 1), // one child: init expression/statement
+            .FOR_COND         => assert(num_kids == 1), // one child: condition expression
+            .FOR_INCR         => assert(num_kids == 1), // one child: increment expression
             .FNDECL           => assert(num_kids == 2),
             .STRUCTDECL       => {},
             .MEMBER           => {assert(num_kids >= 0); assert(num_kids <= 2);},

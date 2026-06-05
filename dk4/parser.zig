@@ -70,6 +70,10 @@ pub const AstNodeTag = enum(u8) {
     WHILE, // 2 children: condition, body
     BLOCK, // arbitrary many children
     DEFER, // 1 child: deferred statement or block
+    FOR, // children: FOR_INIT? → FOR_COND? → FOR_INCR? → BLOCK body
+    FOR_INIT, // 1 child: init statement (declaration or expression). next_sibling → FOR_COND or FOR_INCR or BLOCK
+    FOR_COND, // 1 child: condition expression. next_sibling → FOR_INCR or BLOCK
+    FOR_INCR, // 1 child: increment expression. next_sibling → BLOCK
     ATOM, // no child
     IF, // 3 children: condition, then, else
     STRUCTDECL, // token_index = struct name IDENT. children: MEMBER nodes
@@ -910,8 +914,9 @@ pub const Parser = struct {
         return node_idx;
     }
 
-    fn parseIdentifierStatement(p: *Parser) InternalParserError!AstNodeIndex {
-        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
+    /// Parse an expression, then optionally handle `: ...` as a declaration.
+    /// Returns the AST node (DECLARATION or expression). Does NOT consume end-of-statement.
+    fn parseExpressionOrDeclaration(p: *Parser) InternalParserError!AstNodeIndex {
         const expr = try p.parseExpression();
         if (p.peek(0).tag == .COLON) {
             const lhs_node = p.ast.get(expr);
@@ -920,16 +925,65 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             }
             p.next(); // consume :
-            const decl = try p.parseDeclaration(lhs_node.token_index);
-            if (!try p.expectEndOfStatement())
-                return error.UnexpectedToken;
-            p.next();
-            return decl;
+            return p.parseDeclaration(lhs_node.token_index);
         }
+        return expr;
+    }
+
+    fn parseIdentifierStatement(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .IDENTIFIER);
+        const result = try p.parseExpressionOrDeclaration();
         if (!try p.expectEndOfStatement())
             return error.UnexpectedToken;
         p.next();
-        return expr;
+        return result;
+    }
+
+    pub fn parseFor(p: *Parser) InternalParserError!AstNodeIndex {
+        std.debug.assert(p.peek(0).tag == .FOR);
+        const node_idx = try p.ast.append(.{ .token_index = p.token_idx, .tag = .FOR });
+        p.next();
+
+        const has_parens = p.peek(0).tag == .LPAREN;
+        if (has_parens) p.next();
+
+        const end_tag: Token.Tag = if (has_parens) .RPAREN else .EOL;
+        var child_list = p.ast.startList();
+
+        inline for (0..3) |i| {
+            if (has_parens) p.skip(.{.EOL});
+
+            // detect clause presence before consuming the ;
+            const present = p.peek(0).tag != .SEMICOLON and p.peek(0).tag != end_tag;
+            if (present) {
+                const expr_idx = if (i == 0) try p.parseExpressionOrDeclaration() else try p.parseExpression();
+                const tag: AstNodeTag = switch (i) { 0 => .FOR_INIT, 1 => .FOR_COND, else => .FOR_INCR };
+                const wrapper = try p.ast.append(.{ .token_index = p.ast.get(expr_idx).token_index, .tag = tag });
+                p.ast.get(wrapper).first_child = expr_idx;
+                try child_list.appendExisting(wrapper);
+            }
+
+            if (has_parens) p.skip(.{.EOL});
+
+            // consume ; (not after increment)
+            if (i < 2) {
+                if (!try p.expectToken(.SEMICOLON)) return error.UnexpectedToken;
+                p.next();
+            }
+        }
+
+        if (has_parens) {
+            if (!try p.expectToken(.RPAREN)) return error.UnexpectedToken;
+            p.next();
+        }
+
+        if (!try p.expectToken(.EOL)) return error.UnexpectedToken;
+        p.next();
+
+        const body_idx = try p.parseIndentedCodeBlock();
+        try child_list.appendExisting(body_idx);
+        p.ast.get(node_idx).first_child = child_list.start_index;
+        return node_idx;
     }
 
     fn parseDefer(p: *Parser) ParserError!AstNodeIndex {
@@ -961,6 +1015,7 @@ pub const Parser = struct {
             .RETURN     => res = p.parseReturn(),
             .BREAK      => res = p.parseBreak(),
             .CONTINUE   => res = p.parseContinue(),
+            .FOR        => res = p.parseFor(),
             .FN         => res = p.parseFnDecl(),
             .STRUCT     => res = p.parseStructDecl(),
             .DEFER      => res = p.parseDefer(),

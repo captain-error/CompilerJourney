@@ -65,6 +65,7 @@ pub const Token = struct {
         BREAK,
         CONTINUE,
         DEFER,
+        FOR,
 
         IF,
         ELSE,
@@ -345,6 +346,7 @@ pub const Tokenizer = struct {
             if (std.mem.eql(u8, "and"     , word)) return t.emit(.AND        , len);
             if (std.mem.eql(u8, "not"     , word)) return t.emit(.NOT        , len);
             if (std.mem.eql(u8, "xor"     , word)) return t.emit(.XOR        , len);
+            if (std.mem.eql(u8, "for"     , word)) return t.emit(.FOR        , len);
             if (std.mem.eql(u8, "else"    , word)) return t.emit(.ELSE       , len);
             if (std.mem.eql(u8, "true"    , word)) return t.emit(.TRUE       , len);
             if (std.mem.eql(u8, "false"   , word)) return t.emit(.FALSE      , len);

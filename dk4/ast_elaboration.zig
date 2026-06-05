@@ -80,6 +80,26 @@ const Elaborator = struct {
             return;
         }
 
+        // FOR: walk wrapper nodes, body is loop context
+        if (node.tag == .FOR) {
+            var child_idx = node.first_child;
+            while (child_idx != 0) {
+                const child = e.ast.get(child_idx);
+                switch (child.tag) {
+                    .FOR_INIT => if (child.first_child != 0)
+                        try e.elaborateNode(child.first_child, true, loop_depth),
+                    .FOR_COND => if (child.first_child != 0)
+                        try e.elaborateNode(child.first_child, false, loop_depth),
+                    .FOR_INCR => if (child.first_child != 0)
+                        try e.elaborateNode(child.first_child, true, loop_depth),
+                    .BLOCK => try e.elaborateNode(child_idx, true, loop_depth + 1),
+                    else => {},
+                }
+                child_idx = child.next_sibling;
+            }
+            return;
+        }
+
         const child_allowed = node.tag == .BLOCK or node.tag == .DEFER;
         var child_idx = node.first_child;
         while (child_idx != 0) : (child_idx = e.ast.get(child_idx).next_sibling) {

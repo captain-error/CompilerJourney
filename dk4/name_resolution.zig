@@ -19,12 +19,12 @@ const AstNodeIndex = par.AstNodeIndex;
 // Public types
 // -----------------------------------------------------------------------
 
-pub const DeclIndex = enum(u32) { 
-    NONE = 0, 
+pub const DeclIndex = enum(u32) {
+    NONE = 0,
     // builtin types:
-    Int,  
+    Int,
     Float,
-    Bool , // Bool must always be the last builtin type for the algo below to work correctly
+    Bool, // Bool must always be the last builtin type for the algo below to work correctly
     _,
 };
 
@@ -44,9 +44,7 @@ pub const Declaration = struct {
     ast_node_idx: AstNodeIndex = 0, // FNDECL, STRUCTDECL, DECLARATION, etc.
 };
 
-
-
-pub const ScopeKind = enum(u8) { GLOBAL, FILE, FUNCTION, STRUCT_BODY, BLOCK };
+pub const ScopeKind = enum(u8) { GLOBAL, FILE, FUNCTION, STRUCT_BODY, BLOCK, FOR_HEADER };
 pub const ScopeIndex = enum(u32) { NONE = 0, _ };
 
 pub const Scope = struct {
@@ -136,11 +134,11 @@ pub const DeclInfo = struct {
         return di.errors.items.len > 0;
     }
 
-    pub fn declName(di: *const DeclInfo, idx: DeclIndex, ts : *const TokenStream) []const u8 {
-        if(@intFromEnum(idx) <= @intFromEnum(DeclIndex.BOOL))
+    pub fn declName(di: *const DeclInfo, idx: DeclIndex, ts: *const TokenStream) []const u8 {
+        if (@intFromEnum(idx) <= @intFromEnum(DeclIndex.BOOL))
             // Builtin types have hardcoded names
             return @tagName(idx);
-        
+
         const decl = &di.declarations[@intFromEnum(idx)];
         return ts.tokens[decl.name_token_idx].str(ts.source);
     }
@@ -541,14 +539,13 @@ const Resolver = struct {
             const first_child_idx = member_node.first_child;
             if (first_child_idx == 0) {
                 _ = try r.di.params_or_members.append(.{
-                        .name_token_idx = member_node.token_index,
-                        .type_ = .{ .TYPEVAR = typevar_count },
-                        .default_ast_idx = 0,
-                    });
+                    .name_token_idx = member_node.token_index,
+                    .type_ = .{ .TYPEVAR = typevar_count },
+                    .default_ast_idx = 0,
+                });
                 typevar_count += 1;
                 member_count += 1;
-            }
-            else {
+            } else {
                 // Check children: first child could be TYPE or expr
 
                 const first_child = r.ast.get(first_child_idx);
@@ -729,6 +726,7 @@ const Resolver = struct {
             .CALL_OR_INST => try r.resolveCallOrInst(stmt_idx),
             .IF => try r.resolveIf(stmt_idx, node),
             .WHILE => try r.resolveWhile(stmt_idx, node),
+            .FOR => try r.resolveFor(stmt_idx, node),
             .BLOCK => try r.resolveBlock(stmt_idx),
             .DEFER => try r.resolveStatement(node.first_child),
             .FNDECL => {
@@ -871,6 +869,28 @@ const Resolver = struct {
         try r.resolveStatement(cte.then_idx);
     }
 
+    fn resolveFor(r: *Resolver, _: AstNodeIndex, node: *AstNode) !void {
+        // Create a scope for the for-header (init variable lives here)
+        try r.enterBlock(.FOR_HEADER);
+        defer r.exitBlock();
+
+        var child_idx = node.first_child;
+        while (child_idx != 0) {
+            const child = r.ast.get(child_idx);
+            switch (child.tag) {
+                .FOR_INIT => if (child.first_child != 0)
+                    try r.resolveStatement(child.first_child),
+                .FOR_COND => if (child.first_child != 0)
+                    try r.resolveExpr(child.first_child),
+                .FOR_INCR => if (child.first_child != 0)
+                    try r.resolveExpr(child.first_child),
+                .BLOCK => try r.resolveStatement(child_idx),
+                else => unreachable,
+            }
+            child_idx = child.next_sibling;
+        }
+    }
+
     fn resolveExpr(r: *Resolver, expr_idx: AstNodeIndex) error{OutOfMemory}!void {
         const node = r.ast.get(expr_idx);
         switch (node.tag) {
@@ -984,9 +1004,6 @@ const Resolver = struct {
             .kind = .VARIABLE,
         });
     }
-
-
-
 };
 
 // -----------------------------------------------------------------------
@@ -1399,7 +1416,7 @@ test "resolver error: non-default param after default" {
     var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
     defer di.deinit();
 
-    try printDiErrors(&di, &pr.ast, ts, gpa);
+    // try printDiErrors(&di, &pr.ast, ts, gpa);
     try std.testing.expect(di.hasErrors());
     var found = false;
     for (di.errors.items) |e| {

@@ -1130,6 +1130,150 @@ test "unparenthesized equality chain a == b == c (should fail)" {
     try std.testing.expect(true);
 }
 
+test "parse for loop" {
+    const source =
+        \\for i := 0; i < 10; i += 1
+        \\    result += i
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.FOR,
+        .{
+            AstNodeTag.FOR_INIT,
+            .{ AstNodeTag.DECLARATION, "i", .{ AstNodeTag.ATOM, "0" } },
+        },
+        .{
+            AstNodeTag.FOR_COND,
+            .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "10" } },
+        },
+        .{
+            AstNodeTag.FOR_INCR,
+            .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "1" } },
+        },
+        .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "i" } } },
+    };
+    try testParser(source, Parser.parseStatement, expected, false);
+}
+
+test "parse for loop with parens" {
+    const source =
+        \\for (i := 0; i < 10; i += 1)
+        \\    result += i
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.FOR,
+        .{
+            AstNodeTag.FOR_INIT,
+            .{ AstNodeTag.DECLARATION, "i", .{ AstNodeTag.ATOM, "0" } },
+        },
+        .{
+            AstNodeTag.FOR_COND,
+            .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "10" } },
+        },
+        .{
+            AstNodeTag.FOR_INCR,
+            .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "1" } },
+        },
+        .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "i" } } },
+    };
+    try testParser(source, Parser.parseStatement, expected, false);
+}
+
+test "parse for loop with parens and newlines" {
+    const source =
+        \\for (i := 0;
+        \\     i < 10;
+        \\     i += 1)
+        \\    result += i
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.FOR,
+        .{
+            AstNodeTag.FOR_INIT,
+            .{ AstNodeTag.DECLARATION, "i", .{ AstNodeTag.ATOM, "0" } },
+        },
+        .{
+            AstNodeTag.FOR_COND,
+            .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "10" } },
+        },
+        .{
+            AstNodeTag.FOR_INCR,
+            .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "1" } },
+        },
+        .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "i" } } },
+    };
+    try testParser(source, Parser.parseStatement, expected, false);
+}
+
+test "parse for loop with parens and newlines 2" {
+    const source =
+        \\for (i := 0
+        \\     ; i < 10
+        \\     ; i += 1)
+        \\    result += i
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.FOR,
+        .{
+            AstNodeTag.FOR_INIT,
+            .{ AstNodeTag.DECLARATION, "i", .{ AstNodeTag.ATOM, "0" } },
+        },
+        .{
+            AstNodeTag.FOR_COND,
+            .{ AstNodeTag.BINARY_OP, "<", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "10" } },
+        },
+        .{
+            AstNodeTag.FOR_INCR,
+            .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "1" } },
+        },
+        .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "i" } } },
+    };
+    try testParser(source, Parser.parseStatement, expected, false);
+}
+
+// test "parse for loop with parens and newlines 3" {
+//     const source =
+//         \\for (i := 0;
+//         \\     i < 10
+//         \\     and a != b
+//         \\     ; i += 1)
+//         \\    result += i
+//         \\
+//     ;
+//     const expected = .{
+//         AstNodeTag.FOR,
+//         .{
+//             AstNodeTag.FOR_INIT,
+//             .{ AstNodeTag.DECLARATION, "i", .{ AstNodeTag.ATOM, "0" } },
+//         },
+//         .{
+//             AstNodeTag.FOR_COND, null,
+//         },
+//         .{
+//             AstNodeTag.FOR_INCR,
+//             .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "i" }, .{ AstNodeTag.ATOM, "1" } },
+//         },
+//         .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "+=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "i" } } },
+//     };
+//     try testParser(source, Parser.parseStatement, expected, false);
+// }
+
+test "parse for loop empty clauses" {
+    const source =
+        \\for ; ;
+        \\    result = 42
+        \\
+    ;
+    const expected = .{
+        AstNodeTag.FOR,
+        .{ AstNodeTag.BLOCK, .{ AstNodeTag.BINARY_OP, "=", .{ AstNodeTag.ATOM, "result" }, .{ AstNodeTag.ATOM, "42" } } },
+    };
+    try testParser(source, Parser.parseStatement, expected, false);
+}
+
 test "parse assignment with member and array access" {
     const source = "s.arr[0] = 42\n";
     const expected = .{
