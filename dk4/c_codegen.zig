@@ -114,6 +114,22 @@ const DeferTracker = struct {
         assert(self.stack.top().size > 0);
         return self.stack.top().top().size() > 0;
     }
+
+    pub fn scopeHasDefersAtDepth(self: *DeferTracker, depth: u8) bool {
+        assert(depth > 0);
+        const inner = self.stack.top();
+        assert(depth <= inner.size);
+        return inner.items[depth - 1].size() > 0;
+    }
+
+    pub fn firstDeferLineNumberAtDepth(self: *DeferTracker, depth: u8) u32 {
+        assert(depth > 0);
+        const inner = self.stack.top();
+        assert(depth <= inner.size);
+        const scope_defers = &inner.items[depth - 1];
+        if (scope_defers.size() == 0) return 0;
+        return scope_defers.top().line_number;
+    }
 };
 
 const CCodegen = struct {
@@ -130,6 +146,7 @@ const CCodegen = struct {
         FixedSizeStackOverflow,
         WriteFailed,
         OutOfMemory,
+        NoLoopScope,
     };
 
     pub fn generate(w: *Writer, ft: *const FtAst, gpa: std.mem.Allocator) EmitError!void {
@@ -239,7 +256,7 @@ const CCodegen = struct {
             }
         }
 
-        try emitScopeContents(self, fn_decl.body_scope);
+        try emitScopeContents(self, fn_decl.body_scope, null);
 
         // Main epilogue: printf + return 0
         if (is_main) {
@@ -355,18 +372,18 @@ const CCodegen = struct {
         try self.emitDeferLabel(defer_block_nesting_level, nesting_level, line_num);
     }
 
-    fn emitScope(self: *CCodegen, scope_idx: ScopeIndex) EmitError!void {
+    fn emitScope(self: *CCodegen, scope_idx: ScopeIndex, loop_scope_depth: ?u8) EmitError!void {
         try self.emitStr("{\n");
         self.indent += 1;
 
-        try emitScopeContents(self, scope_idx);
+        try emitScopeContents(self, scope_idx, loop_scope_depth);
 
         self.indent -= 1;
         try self.emitIndent();
         try self.emitStr("}\n");
     }
 
-    fn emitScopeContents(self: *CCodegen, scope_idx: ScopeIndex) EmitError!void {
+    fn emitScopeContents(self: *CCodegen, scope_idx: ScopeIndex, parent_loop_scope_depth: ?u8) EmitError!void {
         const scope = self.ft.scopes.items[scope_idx];
         if (scope.kind == .FN)
             assert(self.defer_tracker.stack.size == 0);
@@ -379,8 +396,8 @@ const CCodegen = struct {
             else => try self.defer_tracker.enterScope(),
         }
 
-        const is_loop_scope = scope.kind == .WHILE; // FIXME! add other loop kinds
-        _ = is_loop_scope;
+        const is_loop_scope = scope.kind == .WHILE or scope.kind == .FOR;
+        const loop_scope_depth: ?u8 = if (is_loop_scope) self.defer_tracker.scope_depth() else parent_loop_scope_depth;
 
         var stmt_idx = scope.first_statement;
         while (stmt_idx != 0) {
@@ -390,9 +407,8 @@ const CCodegen = struct {
                     try self.defer_tracker.pushDefer(defer_stmt);
                 },
                 .RETURN => unreachable, // TODO
-                .CONTINUE => unreachable, // TODO
-                .BREAK => unreachable, // TODO
-                else => try self.emitStatement(stmt),
+                .CONTINUE, .BREAK => try self.emitStatement(stmt, loop_scope_depth),
+                else => try self.emitStatement(stmt, loop_scope_depth),
             }
 
             stmt_idx = stmt.next_sibling;
@@ -403,7 +419,7 @@ const CCodegen = struct {
             try self.emitIndent();
             try self.emitDeferLabel(self.defer_tracker.defer_block_nesting_level(), self.defer_tracker.scope_depth(), defer_stmt.line_number);
             try self.emitStr(": ");
-            try self.emitScope(defer_stmt.scope);
+            try self.emitScope(defer_stmt.scope, loop_scope_depth);
         }
 
         switch (scope.kind) {
@@ -412,6 +428,47 @@ const CCodegen = struct {
                 try self.defer_tracker.exitFnOrDeferBlockScope();
             },
             else => try self.defer_tracker.exitScope(),
+        }
+    }
+
+    // Emit defer bodies inline for all scopes between current depth and loop_scope_depth (exclusive).
+    // Used by break/continue to run pending inner-scope defers before jumping.
+    fn emitInnerScopesDefers(self: *CCodegen, loop_scope_depth: ?u8) EmitError!void {
+        const lsd = loop_scope_depth orelse return error.NoLoopScope;
+        const cur_depth = self.defer_tracker.scope_depth();
+        if (cur_depth <= lsd) return;
+
+        const inner_stack = self.defer_tracker.stack.top();
+        var d: u8 = 0;
+        while (d < cur_depth - lsd) : (d += 1) {
+            const scope_idx: u8 = @intCast(inner_stack.size - 1 - d);
+            try self.emitScopeDefersInline(scope_idx);
+        }
+    }
+
+    // Emit all defers in a scope inline as { ... } blocks (LIFO order).
+    // scope_idx is the raw index into inner_stack.items (0-based).
+    fn emitScopeDefersInline(self: *CCodegen, scope_idx: u8) EmitError!void {
+        const inner_stack = self.defer_tracker.stack.top();
+        const scope_defers = &inner_stack.items[scope_idx];
+        var dit = scope_defers.iterator();
+        while (dit.next()) |defer_stmt| {
+            try self.emitIndent();
+            try self.emitStr("{\n");
+            self.indent += 1;
+            try self.emitDeferScopeInline(defer_stmt.scope, null);
+            self.indent -= 1;
+            try self.emitIndent();
+            try self.emitStr("}\n");
+        }
+    }
+
+    fn emitDeferScopeInline(self: *CCodegen, scope_idx: ScopeIndex, loop_scope_depth: ?u8) EmitError!void {
+        const scope = self.ft.scopes.items[scope_idx];
+        var stmt_idx = scope.first_statement;
+        while (stmt_idx != 0) {
+            try self.emitStatement(self.ft.statements.items[stmt_idx], loop_scope_depth);
+            stmt_idx = self.ft.statements.items[stmt_idx].next_sibling;
         }
     }
 
@@ -442,7 +499,7 @@ const CCodegen = struct {
     //     }
     // }
 
-    fn emitStatement(self: *CCodegen, stmt: Statement) EmitError!void {
+    fn emitStatement(self: *CCodegen, stmt: Statement, loop_scope_depth: ?u8) EmitError!void {
         switch (stmt.kind) {
             .VAR_DECL => |vd| {
                 const var_decl = self.ft.var_decls.items[vd.var_decl_idx];
@@ -476,11 +533,11 @@ const CCodegen = struct {
                 try self.emitStr("if (");
                 try self.emitExpression(ifs.condition, 0, false);
                 try self.emitStr(") ");
-                try self.emitScope(ifs.then_scope);
-                try self.emitIndent();
+                try self.emitScope(ifs.then_scope, loop_scope_depth);
                 if (ifs.else_scope != 0) {
+                    try self.emitIndent();
                     try self.emitStr("else ");
-                    try self.emitScope(ifs.else_scope);
+                    try self.emitScope(ifs.else_scope, loop_scope_depth);
                 }
             },
             .WHILE_LOOP => |wl| {
@@ -488,7 +545,47 @@ const CCodegen = struct {
                 try self.emitStr("while (");
                 try self.emitExpression(wl.condition, 0, false);
                 try self.emitStr(") ");
-                try self.emitScope(wl.body_scope);
+                try self.emitScope(wl.body_scope, loop_scope_depth);
+            },
+            .FOR_LOOP => |fl| {
+                try self.emitIndent();
+                try self.emitStr("for (");
+                // init
+                if (fl.init_stmt != 0) {
+                    const init_stmt = self.ft.statements.items[fl.init_stmt];
+                    switch (init_stmt.kind) {
+                        .VAR_DECL => |vd| {
+                            const var_decl = self.ft.var_decls.items[vd.var_decl_idx];
+                            try self.emitTypeName(var_decl.type_);
+                            try self.emitByte(' ');
+                            try self.emitStr(var_decl.name);
+                            try self.emitStr(" = ");
+                            try self.emitExpression(vd.rhs, 0, false);
+                        },
+                        .ASSIGNMENT => |a| {
+                            try self.emitExpression(a.lhs, 0, false);
+                            try self.emitStr(switch (a.kind) {
+                                .ASSIGN => " = ",
+                                .PLUS => " += ",
+                                .MINUS => " -= ",
+                                .MULT => " *= ",
+                                .DIV => " /= ",
+                            });
+                            try self.emitExpression(a.rhs, 0, false);
+                        },
+                        else => unreachable,
+                    }
+                }
+                try self.emitStr("; ");
+                // condition
+                if (fl.condition != 0)
+                    try self.emitExpression(fl.condition, 0, false);
+                try self.emitStr("; ");
+                // incr
+                if (fl.incr != 0)
+                    try self.emitExpression(fl.incr, 0, false);
+                try self.emitStr(") ");
+                try self.emitScope(fl.body_scope, loop_scope_depth);
             },
             .FN_CALL => |expr_idx| {
                 try self.emitIndent();
@@ -496,25 +593,28 @@ const CCodegen = struct {
                 try self.emitStr(";\n");
             },
             .CONTINUE => {
-                // Note: this only works if the continue apears directly in the loop scope.
-                //       it does not work if it is in a nested non-loop scope.
+                const lsd = loop_scope_depth orelse unreachable; // checked by AST elaboration
+                try self.emitInnerScopesDefers(lsd);
                 try self.emitIndent();
-                if (self.defer_tracker.currentScopeHadDefers()) {
+                if (self.defer_tracker.scopeHasDefersAtDepth(lsd)) {
+                    const line = self.defer_tracker.firstDeferLineNumberAtDepth(lsd);
                     try self.emitStr("DK_CONTINUE(");
-                    try self.emitLabelForCurrentDefer();
+                    try self.emitDeferLabel(
+                        self.defer_tracker.defer_block_nesting_level(),
+                        lsd,
+                        line,
+                    );
                     try self.emitStr(");\n");
                 } else {
                     try self.emitStr("continue;\n");
                 }
-
-                unreachable; // TODO
             },
             .BREAK => {
+                const lsd = loop_scope_depth orelse unreachable; // checked by AST elaboration
+                try self.emitInnerScopesDefers(lsd);
+                try self.emitScopeDefersInline(lsd - 1);
                 try self.emitIndent();
-                // TODO: re emit all defer blocks from the
-                //       current nesting level with line
-                //       nums <= self.last_defer_line_num_per_scope[self.current_nesting_level]
-                unreachable;
+                try self.emitStr("break;\n");
             },
             .RETURN => {
                 try self.emitIndent();
@@ -1029,7 +1129,7 @@ test "generate C with defer" {
         \\             x += 2e-1;
         \\         }
         \\     }
-        \\         result = x + 1e0;
+        \\     result = x + 1e0;
         \\     _dk_defer__0_7: {
         \\         int64_t b = 3;
         \\     }
@@ -1396,6 +1496,201 @@ test "generate C for 3D array literal" {
         \\        }
         \\    } // end array literal assignment
         \\    result = a[0][0][0];
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for defer + continue" {
+    const source =
+        \\fn main()
+        \\    x := 0
+        \\    while x < 10
+        \\        defer result += 1
+        \\        if x > 5
+        \\            defer result += 2
+        \\            continue
+        \\        x += 1
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    int64_t result;
+        \\    int64_t x = 0;
+        \\    while (x < 10) {
+        \\        if (x > 5) {
+        \\            {
+        \\                result += 2;
+        \\            }
+        \\            DK_CONTINUE(_dk_defer__1_3);
+        \\            _dk_defer__2_5: {
+        \\                result += 2;
+        \\            }
+        \\        }
+        \\        x += 1;
+        \\        _dk_defer__1_3: {
+        \\            result += 1;
+        \\        }
+        \\    }
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for defer + continue with no loop-scope defers" {
+    const source =
+        \\fn main()
+        \\    x := 0
+        \\    while x < 10
+        \\        if x > 5
+        \\            defer result += 2
+        \\            continue
+        \\        x += 1
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    int64_t result;
+        \\    int64_t x = 0;
+        \\    while (x < 10) {
+        \\        if (x > 5) {
+        \\            {
+        \\                result += 2;
+        \\            }
+        \\            continue;
+        \\            _dk_defer__2_4: {
+        \\                result += 2;
+        \\            }
+        \\        }
+        \\        x += 1;
+        \\    }
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for defer + break with no loop-scope defers" {
+    const source =
+        \\fn main()
+        \\    x := 0
+        \\    while x < 10
+        \\        if x > 5
+        \\            defer result += 2
+        \\            break
+        \\        x += 1
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    int64_t result;
+        \\    int64_t x = 0;
+        \\    while (x < 10) {
+        \\        if (x > 5) {
+        \\            {
+        \\                result += 2;
+        \\            }
+        \\            break;
+        \\            _dk_defer__2_4: {
+        \\                result += 2;
+        \\            }
+        \\        }
+        \\        x += 1;
+        \\    }
+        \\    printf("%ld\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for defer + break" {
+    const source =
+        \\fn main()
+        \\    x := 0
+        \\    while x < 10
+        \\        defer result += 1
+        \\        if x > 5
+        \\            defer result += 2
+        \\            break
+        \\        x += 1
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    int64_t result;
+        \\    int64_t x = 0;
+        \\    while (x < 10) {
+        \\        if (x > 5) {
+        \\            {
+        \\                result += 2;
+        \\            }
+        \\            {
+        \\                result += 1;
+        \\            }
+        \\            break;
+        \\            _dk_defer__2_5: {
+        \\                result += 2;
+        \\            }
+        \\        }
+        \\        x += 1;
+        \\        _dk_defer__1_3: {
+        \\            result += 1;
+        \\        }
+        \\    }
         \\    printf("%ld\n", result);
         \\    return 0;
         \\}

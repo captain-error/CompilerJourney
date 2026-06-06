@@ -132,6 +132,7 @@ pub const Scope = struct {
         IF,
         ELSE,
         WHILE,
+        FOR,
         DEFER
     };
 };
@@ -229,6 +230,12 @@ pub const Statement = struct {
         },
         WHILE_LOOP: struct {
             condition: ExpressionIndex,
+            body_scope: ScopeIndex = 0,
+        },
+        FOR_LOOP: struct {
+            init_stmt: StatementIndex = 0, // 0 if no init
+            condition: ExpressionIndex = 0, // 0 if no condition (infinite loop)
+            incr: ExpressionIndex = 0, // 0 if no incr
             body_scope: ScopeIndex = 0,
         },
         FN_CALL: ExpressionIndex,

@@ -968,7 +968,18 @@ const TypeInferer = struct {
             .CALL_OR_INST => ti.inferCallOrInstStmt(ast_idx),
             .IF => ti.inferIf(ast_idx, parent_scope),
             .WHILE => ti.inferWhile(ast_idx, parent_scope),
+            .FOR => ti.inferFor(ast_idx, parent_scope),
             .DEFER => ti.inferDefer(ast_idx, parent_scope),
+            .BREAK => blk: {
+                const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+                try ti.ft.statements.append(ti.gpa, .{ .kind = .{ .BREAK = {} } });
+                break :blk stmt_idx;
+            },
+            .CONTINUE => blk: {
+                const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+                try ti.ft.statements.append(ti.gpa, .{ .kind = .{ .CONTINUE = {} } });
+                break :blk stmt_idx;
+            },
             else => {
                 std.debug.print("Unhandled AST node tag: {}\n", .{node.tag});
                 unreachable;
@@ -1473,6 +1484,59 @@ const TypeInferer = struct {
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .WHILE_LOOP = .{
                 .condition = cond_expr,
+                .body_scope = body_scope,
+            } },
+        });
+        return stmt_idx;
+    }
+
+    fn inferFor(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+        const node = ti.ast.get(ast_idx);
+
+        // Create a scope for the for-header (init variable lives here)
+        const header_scope: ScopeIndex = @intCast(ti.ft.scopes.items.len);
+        try ti.ft.scopes.append(ti.gpa, .{ .kind = .INVALID, .parent_scope = parent_scope });
+
+        var init_stmt: StatementIndex = 0;
+        var cond_expr: ExpressionIndex = 0;
+        var incr_expr: ExpressionIndex = 0;
+        var body_ast_idx: AstNodeIndex = 0;
+
+        var child_idx = node.first_child;
+        while (child_idx != 0) {
+            const child = ti.ast.get(child_idx);
+            switch (child.tag) {
+                .FOR_INIT => {
+                    if (child.first_child != 0)
+                        init_stmt = try ti.inferStatement(child.first_child, header_scope);
+                },
+                .FOR_COND => {
+                    if (child.first_child != 0)
+                        cond_expr = try ti.inferExpr(child.first_child);
+                },
+                .FOR_INCR => {
+                    if (child.first_child != 0)
+                        incr_expr = try ti.inferExpr(child.first_child);
+                },
+                .BLOCK => body_ast_idx = child_idx,
+                else => unreachable,
+            }
+            child_idx = child.next_sibling;
+        }
+
+        if (cond_expr != 0) {
+            const cond_type = ti.ft.expressions.items[cond_expr].type_;
+            try ti.expectType(ast_idx, cond_type, DkType.BOOL);
+        }
+
+        const body_scope = try ti.inferBlock(body_ast_idx, .FOR, header_scope);
+
+        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        try ti.ft.statements.append(ti.gpa, .{
+            .kind = .{ .FOR_LOOP = .{
+                .init_stmt = init_stmt,
+                .condition = cond_expr,
+                .incr = incr_expr,
                 .body_scope = body_scope,
             } },
         });
