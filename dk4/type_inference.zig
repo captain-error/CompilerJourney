@@ -1602,6 +1602,13 @@ const TypeInferer = struct {
                     .kind = .{ .LITERAL = .{ .boolean = false } },
                 });
             },
+            .STRING_LIT => {
+                const str_slice = token.str(ti.source);
+                try ti.ft.expressions.append(ti.gpa, .{
+                    .type_ = DkType.STRING,
+                    .kind = .{ .LITERAL = .{ .string = str_slice } },
+                });
+            },
             .IDENTIFIER => {
                 const decl_idx = ti.di.name_resolution[ast_idx];
                 assert(decl_idx != .NONE);

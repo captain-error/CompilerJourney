@@ -104,6 +104,17 @@ pub const ParseResult = struct {
         self.ast.deinit();
         self.errors.deinit(self.gpa);
     }
+
+    pub fn printErrors(self: *const ParseResult, writer: *std.Io.Writer, ts: TokenStream) !void {
+        for (self.errors.items) |err| {
+            const pos = try ts.printLineAndMarkToken(writer, err.token_index);
+            const token = ts.tokens[err.token_index];
+            try writer.print("line {}: Error: found {s}. Expected: {s}\n\n", .{ pos.line, @tagName(token.tag), err.expected });
+        }
+        try writer.flush();
+    }
+
+
 };
 
 pub fn parse(source: []const u8, tokens: []const Token, gpa: std.mem.Allocator) !ParseResult {
@@ -430,6 +441,7 @@ pub const Parser = struct {
             .{
                 .FLOAT_LIT,
                 .INT_LIT,
+                .STRING_LIT,
                 .TRUE,
                 .FALSE,
                 .IDENTIFIER,

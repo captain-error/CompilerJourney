@@ -18,6 +18,7 @@ pub const Token = struct {
         INVALID_INDENT,
 
         IDENTIFIER,
+        STRING_LIT,
         FLOAT_LIT,
         INT_LIT,
         TRUE,
@@ -320,6 +321,20 @@ pub const Tokenizer = struct {
                     return t.emit(.ELLIPSIS, 3);
                 if (tail.len >= 2 and isNum(tail[1])) {} // fall through to number parsing below
                 else return t.emit(.DOT, 1);
+            },
+            // .STRING_LIT
+            '"' => {
+                var len: usize = 1; // opening quote
+                var i: usize = 1;
+                while (i < tail.len) : (i += 1) {
+                    len += 1;
+                    if (tail[i] == '"') break;
+                    if (tail[i] == '\\' and i + 1 < tail.len) {
+                        len += 1; // count skipped char
+                        i += 1;   // skip escaped char in loop too
+                    }
+                }
+                return t.emit(.STRING_LIT, @intCast(len));
             },
             else => {},
         } // switch --------------------------------------
@@ -644,4 +659,34 @@ test "COLON ASSIGN without space" {
     try expect(t.tag == .INT_LIT);
     t = tokenizer.next();
     try expect(t.tag == .EOF);
+}
+
+test "STRING_LIT basic" {
+    const source = "\"hello world\"";
+    var tokenizer = Tokenizer{ .source = source };
+    var t = tokenizer.next();
+    try std.testing.expect(t.tag == .STRING_LIT);
+    try std.testing.expectEqualStrings(t.str(source), "\"hello world\"");
+    t = tokenizer.next();
+    try std.testing.expect(t.tag == .EOF);
+}
+
+test "STRING_LIT with escaped quote" {
+    const source = "\"say \\\"hello\\\"\"";
+    var tokenizer = Tokenizer{ .source = source };
+    var t = tokenizer.next();
+    try std.testing.expect(t.tag == .STRING_LIT);
+    try std.testing.expectEqualStrings(t.str(source), "\"say \\\"hello\\\"\"");
+    t = tokenizer.next();
+    try std.testing.expect(t.tag == .EOF);
+}
+
+test "STRING_LIT with backslash" {
+    const source = "\"path\\\\to\\\\file\"";
+    var tokenizer = Tokenizer{ .source = source };
+    var t = tokenizer.next();
+    try std.testing.expect(t.tag == .STRING_LIT);
+    try std.testing.expectEqualStrings(t.str(source), "\"path\\\\to\\\\file\"");
+    t = tokenizer.next();
+    try std.testing.expect(t.tag == .EOF);
 }

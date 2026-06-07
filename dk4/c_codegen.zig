@@ -132,7 +132,7 @@ const DeferTracker = struct {
     }
 };
 
-const CCodegen = struct {
+pub const CCodegen = struct {
     ft: *const FtAst,
     w: *Writer,
     indent: u32,
@@ -644,6 +644,7 @@ const CCodegen = struct {
                 .int => |v| try self.w.print("{d}", .{v}),
                 .float => |v| try self.w.print("{e}", .{v}),
                 .boolean => |v| try self.emitStr(if (v) "true" else "false"),
+                .string => |v| try self.emitStr(v), // v is raw `"..."` from source, valid C
             },
             .BINARY_OP => |bin| {
                 if (bin.op == .POW) {
@@ -773,6 +774,8 @@ const CCodegen = struct {
             try self.emitStr("printf(\"%.6f\\n\", result);")
         else if (result_type == DkType.BOOL)
             try self.emitStr("printf(\"%s\\n\", result ? \"true\" : \"false\");")
+        else if (result_type == DkType.STRING)
+            try self.emitStr("printf(\"%s\\n\", result);")
         else
             unreachable;
     }
@@ -791,6 +794,8 @@ const CCodegen = struct {
             try self.emitStr("double")
         else if (t == DkType.BOOL)
             try self.emitStr("bool")
+        else if (t == DkType.STRING)
+            try self.emitStr("const char*")
         else if (t == DkType.VOID)
             try self.emitStr("void")
         else

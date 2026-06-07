@@ -23,6 +23,7 @@ pub const DkType = packed struct(u32) {
         BOOL,
         INT,
         FLOAT,
+        STRING,
         ANY,
     };
 
@@ -32,6 +33,7 @@ pub const DkType = packed struct(u32) {
     pub const BOOL:    DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.BOOL) };
     pub const INT:     DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.INT) };
     pub const FLOAT:   DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.FLOAT) };
+    pub const STRING:  DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.STRING) };
     pub const ANY:     DkType = .{ .kind = .SCALAR,  .index = @intFromEnum(ScalarType.ANY) };
 
     pub fn isScalar(self: DkType) bool { return self.kind == .SCALAR; }
@@ -57,8 +59,9 @@ pub const DkType = packed struct(u32) {
             .SCALAR  => switch (self.scalar()) {
                 .BOOL  => "Bool",
                 .INT   => "Int",
-                .FLOAT => "Float",
-                .ANY   => "Any",
+                .FLOAT  => "Float",
+                .STRING => "String",
+                .ANY    => "Any",
             },
             .STRUCT => "Struct",
             .ARRAY  => "Array",
@@ -169,6 +172,7 @@ pub const Expression = struct {
             int: i64,
             float: f64,
             boolean: bool,
+            string: []const u8, // raw source slice (includes surrounding quotes e.g. `"hello"`)
         },
         BINARY_OP: struct {
             op: BinaryOp,
