@@ -55,7 +55,8 @@ pub const Scope = struct {
 pub const TypeVarId = u8;
 
 pub const ParamOrMember = struct {
-    name_token_idx: TokenIndex = 0,
+    // name_token_idx: TokenIndex = 0,
+    name_ast_idx: AstNodeIndex = 0,
     type_: union(enum) {
         CONCRETE: DeclIndex, // explicit : Type — known at name resolution
         TYPEVAR: TypeVarId, // bare name, generic — monomorphize per instantiation
@@ -65,6 +66,14 @@ pub const ParamOrMember = struct {
 
     pub fn isGeneric(self: *const ParamOrMember) bool {
         return self.type_ == .TYPEVAR;
+    }
+
+    pub fn nameTokenIdx(self: ParamOrMember, ast: *const AST) TokenIndex {
+        return ast.get(self.name_ast_idx).token_index;
+    }
+
+    pub fn name(self: ParamOrMember, ast: *const AST, ts: *const TokenStream) []const u8 {
+        return ts.sourceStr(self.nameTokenIdx(ast));
     }
 };
 
@@ -77,6 +86,7 @@ pub const FunctionTemplate = struct {
     param_count: u8 = 0,
     typevar_count: u8 = 0,
     decl_idx: DeclIndex = .NONE,
+    result_var_decl_idx: DeclIndex = .NONE,
 
     pub fn params(self: *const FunctionTemplate, params_array: *const ParamsOrMembers) []const ParamOrMember {
         return params_array.slice(self.first_param_idx, self.param_count);
@@ -208,9 +218,10 @@ pub const DeclInfo = struct {
                     });
                 },
                 .function_parameters_have_same_name => |e| {
-                    const pos = try ts.printLineAndMarkToken(writer, e.second_param);
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.second_param, null);
+                    const node = ast.get(e.second_param);
                     try writer.print("line {}: Error: duplicate parameter name '{s}'.\n\n", .{
-                        pos.line, ts.sourceStr(e.second_param),
+                        pos.line, ts.sourceStr(node.token_index),
                     });
                 },
                 .duplicate_struct_member => |e| {
@@ -268,7 +279,7 @@ pub const Error = union(enum) {
     symbol_is_not_a_variable_but_function: struct { declaration: TokenIndex, usage: TokenIndex },
     redeclaration_of_result_var: TokenIndex,
     param_shadows_global: struct { global_decl: TokenIndex, param_decl: TokenIndex },
-    function_parameters_have_same_name: struct { first_param: TokenIndex, second_param: TokenIndex },
+    function_parameters_have_same_name: struct { first_param: AstNodeIndex, second_param: AstNodeIndex },
     duplicate_struct_member: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     struct_name_shadows: struct { first_decl: TokenIndex, error_decl: TokenIndex },
     default_must_be_literal: TokenIndex,
@@ -295,6 +306,7 @@ const SymbolTable = std.hash_map.StringHashMapUnmanaged(SymbolInfo);
 const Resolver = struct {
     source: []const u8,
     tokens: []const Token,
+    ts: *const TokenStream,
     ast: *const AST,
 
     di: *DeclInfo,
@@ -476,18 +488,20 @@ const Resolver = struct {
         try r.enterBlock(.FUNCTION);
 
         // Register params
-        const ft = r.di.fn_templates.items[r.di.fn_templates.items.len - 1];
+        const ft = &r.di.fn_templates.items[r.di.fn_templates.items.len - 1];
         const params = ft.params(&r.di.params_or_members);
         for (params) |param| {
-            const param_name = r.tokenStr(param.name_token_idx);
+            const name_token_idx = param.nameTokenIdx(r.ast);
+            const param_name = r.tokenStr(name_token_idx);
             const param_decl_idx = try r.addDecl(.{
-                .name_token_idx = param.name_token_idx,
+                .name_token_idx = name_token_idx,
                 .kind = .FN_PARAM,
                 .scope_idx = r.currentScope(),
-                .ast_node_idx = 0,
+                .ast_node_idx = param.name_ast_idx,
             });
+            r.di.name_resolution[param.name_ast_idx] = param_decl_idx;
             try r.putSymbol(param_name, .{
-                .declaration_token = param.name_token_idx,
+                .declaration_token = name_token_idx,
                 .decl_idx = param_decl_idx,
                 .kind = .FN_PARAM,
             });
@@ -500,6 +514,7 @@ const Resolver = struct {
             .scope_idx = r.currentScope(),
             .ast_node_idx = node_idx,
         });
+        ft.result_var_decl_idx = result_decl_idx;
         try r.putSymbol("result", .{
             .declaration_token = node.token_index,
             .decl_idx = result_decl_idx,
@@ -508,7 +523,8 @@ const Resolver = struct {
 
         // Resolve body
         const fn_params_node = r.ast.get(node.first_child);
-        try r.resolveBlock(fn_params_node.next_sibling);
+        const body_node_idx = fn_params_node.next_sibling;
+        try r.resolveBlock(body_node_idx);
 
         r.exitBlock();
     }
@@ -528,8 +544,9 @@ const Resolver = struct {
             const member_name = r.tokenStr(member_node.token_index);
             const existing_members = r.di.params_or_members.items[@intFromEnum(first_member_idx)..][0..member_count];
             for (existing_members) |em| {
-                if (std.mem.eql(u8, r.tokenStr(em.name_token_idx), member_name)) {
-                    try r.addError(.{ .duplicate_struct_member = .{ .first_decl = em.name_token_idx, .error_decl = member_node.token_index } });
+                const name_token_idx = em.nameTokenIdx(r.ast);
+                if (std.mem.eql(u8, r.tokenStr(name_token_idx), member_name)) {
+                    try r.addError(.{ .duplicate_struct_member = .{ .first_decl = name_token_idx, .error_decl = member_node.token_index } });
                     break;
                 }
             }
@@ -539,7 +556,8 @@ const Resolver = struct {
             const first_child_idx = member_node.first_child;
             if (first_child_idx == 0) {
                 _ = try r.di.params_or_members.append(.{
-                    .name_token_idx = member_node.token_index,
+                    // .name_token_idx = member_node.token_index,
+                    .name_ast_idx = member_idx,
                     .type_ = .{ .TYPEVAR = typevar_count },
                     .default_ast_idx = 0,
                 });
@@ -561,7 +579,8 @@ const Resolver = struct {
                         try r.validateLiteralDefault(default_idx);
 
                     _ = try r.di.params_or_members.append(.{
-                        .name_token_idx = member_node.token_index,
+                        // .name_token_idx = member_node.token_index,
+                        .name_ast_idx = member_idx,
                         .type_ = .{ .CONCRETE = type_decl },
                         .default_ast_idx = default_idx,
                     });
@@ -572,7 +591,8 @@ const Resolver = struct {
                     // TODO: add compile time expression evaluation later.
 
                     _ = try r.di.params_or_members.append(.{
-                        .name_token_idx = member_node.token_index,
+                        // .name_token_idx = member_node.token_index,
+                        .name_ast_idx = member_idx,
                         .type_ = .{ .UNRESOLVED = {} },
                         .default_ast_idx = rhs_idx,
                     });
@@ -634,7 +654,8 @@ const Resolver = struct {
             if (first_child_idx == 0) {
                 // bare param (no type, no default) — typevar
                 _ = try r.di.params_or_members.append(.{
-                    .name_token_idx = param_node.token_index,
+                    // .name_token_idx = param_node.token_index,
+                    .name_ast_idx = param_idx,
                     .type_ = .{ .TYPEVAR = typevar_count },
                 });
                 typevar_count += 1;
@@ -647,14 +668,16 @@ const Resolver = struct {
                         if (default_idx != 0)
                             try r.validateLiteralDefault(default_idx);
                         _ = try r.di.params_or_members.append(.{
-                            .name_token_idx = param_node.token_index,
+                            // .name_token_idx = param_node.token_index,
+                            .name_ast_idx = param_idx,
                             .type_ = .{ .CONCRETE = type_decl },
                             .default_ast_idx = default_idx,
                         });
                     } else {
                         try r.addError(.{ .undecl_type = first_child.token_index });
                         _ = try r.di.params_or_members.append(.{
-                            .name_token_idx = param_node.token_index,
+                            // .name_token_idx = param_node.token_index,
+                            .name_ast_idx = param_idx,
                             .type_ = .{ .TYPEVAR = typevar_count },
                         });
                         typevar_count += 1;
@@ -663,7 +686,8 @@ const Resolver = struct {
                     // no type annotation, has default — UNRESOLVED
                     try r.validateLiteralDefault(first_child_idx);
                     _ = try r.di.params_or_members.append(.{
-                        .name_token_idx = param_node.token_index,
+                        // .name_token_idx = param_node.token_index,
+                        .name_ast_idx = param_idx,
                         .type_ = .{ .UNRESOLVED = {} },
                         .default_ast_idx = first_child_idx,
                     });
@@ -674,10 +698,13 @@ const Resolver = struct {
         // Check duplicate param names
         for (0..param_count) |i| {
             for (i + 1..param_count) |j| {
-                const ti_idx = r.di.params_or_members.items[@intFromEnum(first_param_idx) + i].name_token_idx;
-                const tj_idx = r.di.params_or_members.items[@intFromEnum(first_param_idx) + j].name_token_idx;
-                if (std.mem.eql(u8, r.tokenStr(ti_idx), r.tokenStr(tj_idx)))
-                    try r.addError(.{ .function_parameters_have_same_name = .{ .first_param = ti_idx, .second_param = tj_idx } });
+                const param_i = r.di.params_or_members.items[@intFromEnum(first_param_idx) + i];
+                const param_j = r.di.params_or_members.items[@intFromEnum(first_param_idx) + j];
+
+                const param_i_name = param_i.name(r.ast, r.ts);
+                const param_j_name = param_j.name(r.ast, r.ts);
+                if (std.mem.eql(u8, param_i_name, param_j_name))
+                    try r.addError(.{ .function_parameters_have_same_name = .{ .first_param = param_i.name_ast_idx, .second_param = param_j.name_ast_idx } });
             }
         }
 
@@ -687,9 +714,9 @@ const Resolver = struct {
         for (params_slice) |p| {
             if (p.default_ast_idx != 0) {
                 if (first_default_token == null)
-                    first_default_token = p.name_token_idx;
+                    first_default_token = p.nameTokenIdx(r.ast);
             } else if (first_default_token) |fd| {
-                try r.addError(.{ .non_default_param_after_default = .{ .param = p.name_token_idx, .first_default = fd } });
+                try r.addError(.{ .non_default_param_after_default = .{ .param = p.nameTokenIdx(r.ast), .first_default = fd } });
             }
         }
 
@@ -1013,7 +1040,7 @@ const Resolver = struct {
 pub fn resolve(
     gpa: std.mem.Allocator,
     ast: *const AST,
-    tokens: []const Token,
+    ts: *const TokenStream,
     source: []const u8,
     root_idx: AstNodeIndex,
 ) !DeclInfo {
@@ -1037,8 +1064,9 @@ pub fn resolve(
 
     var resolver = Resolver{
         .source = source,
-        .tokens = tokens,
+        .tokens = ts.tokens,
         .ast = ast,
+        .ts = ts,
         .di = &di,
         .gpa = gpa,
     };
@@ -1084,7 +1112,7 @@ test "resolve simple program" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1110,7 +1138,7 @@ test "resolve undeclared variable" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1137,7 +1165,7 @@ test "resolve duplicate variable" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1166,7 +1194,7 @@ test "resolve function call" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1195,7 +1223,7 @@ test "resolve struct declaration" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1227,7 +1255,7 @@ test "resolve struct with generic member" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1258,7 +1286,7 @@ test "resolve struct instantiation" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1299,7 +1327,7 @@ test "resolve duplicate struct member" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1329,7 +1357,7 @@ test "resolve shadowing error" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1354,7 +1382,7 @@ test "resolve unknown function" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1383,7 +1411,7 @@ test "resolve member access" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) try printDiErrors(&di, &pr.ast, ts, gpa);
@@ -1413,7 +1441,7 @@ test "resolver error: non-default param after default" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
 
     // try printDiErrors(&di, &pr.ast, ts, gpa);

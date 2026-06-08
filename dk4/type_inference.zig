@@ -40,7 +40,6 @@ const ParamsOrMembers = nr.ParamsOrMembers;
 const MAX_NUM_FUNCTION_PARAMS = 32;
 const MAX_TYPEVARS = 32;
 
-
 pub const TypeError = union(enum) {
     return_type_missing_for_recursive_fn: AstNodeIndex,
     fn_params_are_immutable: struct {
@@ -132,8 +131,6 @@ pub const TypeErrorInfo = struct {
 
     pub const MAX_FN_INSTANTIATION_REPORT_DEPTH = 16;
 };
-
-
 
 // -----------------------------------------------------------------------
 // DkType ↔ DeclIndex mapping for builtin types
@@ -731,7 +728,7 @@ const TypeInferer = struct {
         const saved_scope = ti.current_scope;
         ti.decl_map = .empty;
         defer {
-            ti.decl_map.deinit(ti.gpa);
+            ti.decl_map.deinit(ti.gpa); // FIXME! we should not deallocate this but store it in a pool for reuse!
             ti.decl_map = saved_decl_map;
             ti.current_scope = saved_scope;
         }
@@ -755,21 +752,12 @@ const TypeInferer = struct {
         });
         ti.ft.scopes.items[scope_idx].first_decl = result_decl_idx;
 
-        // Find the result DeclIndex from name resolution (it's a RESULT_VARIABLE in the fn's scope)
-        // The result decl was registered with ast_node_idx = fn node_idx
-        const result_decl_search = blk: {
-            for (ti.di.declarations.items[1..], 1..) |decl, idx| {
-                if (decl.kind == .RESULT_VARIABLE and decl.ast_node_idx == fn_template.ast_idx)
-                    break :blk @as(DeclIndex, @enumFromInt(idx));
-            }
-            unreachable;
-        };
-        try ti.decl_map.put(ti.gpa, result_decl_search, result_decl_idx);
+        try ti.decl_map.put(ti.gpa, fn_template.result_var_decl_idx, result_decl_idx);
 
         // Create param VarDecls
         const params_start: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         for (params, param_types) |param, ptype| {
-            const param_name = try ti.ft.arena.allocator().dupe(u8, ti.tokens[param.name_token_idx].str(ti.source));
+            const param_name = try ti.ft.arena.allocator().dupe(u8, param.name(ti.ast, &ti.ts));
             const var_decl_idx: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
             try ti.ft.var_decls.append(ti.gpa, .{
                 .name = param_name,
@@ -778,14 +766,7 @@ const TypeInferer = struct {
                 .parent_scope = scope_idx,
             });
 
-            // Find param's DeclIndex
-            const param_decl_idx = blk: {
-                for (ti.di.declarations.items[1..], 1..) |decl, idx| {
-                    if (decl.kind == .FN_PARAM and decl.name_token_idx == param.name_token_idx)
-                        break :blk @as(DeclIndex, @enumFromInt(idx));
-                }
-                unreachable;
-            };
+            const param_decl_idx = ti.di.name_resolution[param.name_ast_idx];
             try ti.decl_map.put(ti.gpa, param_decl_idx, var_decl_idx);
         }
         const params_end: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
@@ -873,7 +854,7 @@ const TypeInferer = struct {
         // Create member VarDecls
         const members_start: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         for (members, member_types[0..template.member_count]) |m, mt| {
-            const member_name = try arena.dupe(u8, ti.tokens[m.name_token_idx].str(ti.source));
+            const member_name = try arena.dupe(u8, m.name(ti.ast, &ti.ts));
             try ti.ft.var_decls.append(ti.gpa, .{
                 .name = member_name,
                 .type_ = mt,
@@ -907,9 +888,7 @@ const TypeInferer = struct {
 
             if (prev_stmt_idx == 0) {
                 ti.ft.scopes.items[scope_idx].first_statement = stmt_idx;
-            }
-            else
-            {
+            } else {
                 ti.ft.statements.items[prev_stmt_idx].next_sibling = stmt_idx;
             }
 
@@ -927,14 +906,13 @@ const TypeInferer = struct {
     fn inferDefer(ti: *TypeInferer, defer_ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
         const defer_node = ti.ast.get(defer_ast_idx);
         assert(defer_node.tag == .DEFER);
-        
+
         var scope_idx: ScopeIndex = 0;
 
         const child_node = ti.ast.get(defer_node.first_child);
-        if(child_node.tag == .BLOCK) {
+        if (child_node.tag == .BLOCK) {
             scope_idx = try ti.inferBlock(defer_ast_idx, .DEFER, parent_scope);
-        }
-        else {
+        } else {
             // If the child is not a block but a statement, wrap it in a scope anyway.
             // This unifies both cases for codegen.
             scope_idx = @intCast(ti.ft.scopes.items.len);
@@ -945,12 +923,10 @@ const TypeInferer = struct {
 
         const defer_stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
-            .kind = .{
-                .DEFER = .{
-                    .line_number = ti.ts.token_lines[defer_node.token_index],
-                    .scope = scope_idx,
-                } 
-            },
+            .kind = .{ .DEFER = .{
+                .line_number = ti.ts.token_lines[defer_node.token_index],
+                .scope = scope_idx,
+            } },
         });
 
         return defer_stmt_idx;
@@ -1799,7 +1775,7 @@ const TypeInferer = struct {
                 const arg_name = ti.tokens[arg_node.token_index].str(ti.source);
                 var found_idx: ?u8 = null;
                 for (params, 0..) |p, i| {
-                    if (std.mem.eql(u8, ti.tokens[p.name_token_idx].str(ti.source), arg_name)) {
+                    if (std.mem.eql(u8, p.name(ti.ast, &ti.ts), arg_name)) {
                         found_idx = @intCast(i);
                         break;
                     }
@@ -1841,7 +1817,7 @@ const TypeInferer = struct {
                 result.exprs[i] = default_expr;
                 param_set[i] = true;
             } else {
-                try ti.addError(.{ .missing_required_arg = .{ .ast_node = ast_idx, .member_name = p.name_token_idx } });
+                try ti.addError(.{ .missing_required_arg = .{ .ast_node = ast_idx, .member_name = p.nameTokenIdx(ti.ast) } });
             }
         }
 
@@ -1970,7 +1946,7 @@ const TypeInferer = struct {
 
         var member_idx: ?u8 = null;
         for (members, 0..) |m, i| {
-            if (std.mem.eql(u8, ti.tokens[m.name_token_idx].str(ti.source), field_name)) {
+            if (std.mem.eql(u8, m.name(ti.ast, &ti.ts), field_name)) {
                 member_idx = @intCast(i);
                 break;
             }
@@ -2009,8 +1985,6 @@ const TypeInferer = struct {
             else => unreachable,
         };
     }
-
-    
 };
 
 // tests for this file have been moved to type_inference_tests.zig

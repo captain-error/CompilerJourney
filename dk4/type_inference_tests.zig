@@ -60,7 +60,7 @@ test "merged: zinseszins program" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -102,7 +102,7 @@ test "merged: type error in binary op" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -138,7 +138,7 @@ test "merged: generic function instantiation" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -179,7 +179,7 @@ test "function with default args" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -212,7 +212,7 @@ test "function with named args" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -243,7 +243,7 @@ test "function missing required arg" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -275,7 +275,7 @@ test "supply wrong type to fn param with default" {
     var elab_errors = try elab.elaborate(&pr.ast, ts.tokens, pr.root_node, gpa);
     defer elab_errors.deinit(gpa);
 
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     try std.testing.expect(!di.hasErrors());
 
@@ -406,7 +406,7 @@ fn inferProgram(source: []const u8, gpa: std.mem.Allocator) !type_inference.Infe
     defer ts.deinit(gpa);
     var pr = try par.parse(source, ts.tokens, gpa);
     defer pr.deinit();
-    var di = try nr.resolve(gpa, &pr.ast, ts.tokens, source, pr.root_node);
+    var di = try nr.resolve(gpa, &pr.ast, &ts, source, pr.root_node);
     defer di.deinit();
     var ti_res = try infer(gpa, ts, &pr.ast, &di);
     if (ti_res.errors.items.len > 0) {
