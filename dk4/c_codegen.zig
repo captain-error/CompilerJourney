@@ -1704,3 +1704,64 @@ test "generate C for defer + break" {
 
     try runCompilerAndCompareOutput(source, expected);
 }
+
+
+test "generate C for string literal as result" {
+    const source =
+        \\fn main()
+        \\    result = "hello"
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    const char* result;
+        \\    result = "hello";
+        \\    printf("%s\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
+
+test "generate C for string variable declaration" {
+    const source =
+        \\fn main()
+        \\    s := "hello"
+        \\    result = s
+    ;
+
+    const expected =
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <math.h>
+        \\#include <stdio.h>
+        \\
+        \\#define DK_CONTINUE(label) goto label
+        \\#define DK_LEAVE_FN(label) goto label
+        \\
+        \\
+        \\int main(void)
+        \\{
+        \\    const char* result;
+        \\    const char* s = "hello";
+        \\    result = s;
+        \\    printf("%s\n", result);
+        \\    return 0;
+        \\}
+        \\
+    ;
+
+    try runCompilerAndCompareOutput(source, expected);
+}
