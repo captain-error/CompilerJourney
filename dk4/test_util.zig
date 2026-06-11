@@ -42,7 +42,7 @@ pub fn testAstStructure(ast: *const AST) void {
             .FOR_INIT         => assert(num_kids == 1), // one child: init expression/statement
             .FOR_COND         => assert(num_kids == 1), // one child: condition expression
             .FOR_INCR         => assert(num_kids == 1), // one child: increment expression
-            .FNDECL           => assert(num_kids == 2),
+            .FNDECL           => assert(num_kids == 2 or num_kids == 3), // FNPARAMS + [optional TYPE] + BODY
             .STRUCTDECL       => {},
             .MEMBER           => {assert(num_kids >= 0); assert(num_kids <= 2);},
             .PARAM            => {assert(num_kids >= 0); assert(num_kids <= 2);},

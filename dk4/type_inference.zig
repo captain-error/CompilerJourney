@@ -22,21 +22,6 @@ const Scope = ft_ast.Scope;
 
 const DkType = ft_ast.DkType;
 
-const BinaryOp = ft_ast.BinaryOp;
-const UnaryOp = ft_ast.UnaryOp;
-const AssignmentKind = ft_ast.AssignmentKind;
-const ScopeIndex = ft_ast.ScopeIndex;
-const StatementIndex = ft_ast.StatementIndex;
-const ExpressionIndex = ft_ast.ExpressionIndex;
-const VarDeclIndex = ft_ast.VarDeclIndex;
-const FnDeclIndex = ft_ast.FnDeclIndex;
-const StructInstanceIndex = ft_ast.StructInstanceIndex;
-
-const DeclIndex = nr.DeclIndex;
-const DeclInfo = nr.DeclInfo;
-const ParamOrMember = nr.ParamOrMember;
-const ParamsOrMembers = nr.ParamsOrMembers;
-
 const MAX_NUM_FUNCTION_PARAMS = 32;
 const MAX_TYPEVARS = 32;
 
@@ -117,6 +102,11 @@ pub const TypeError = union(enum) {
         ast_node: AstNodeIndex,
         actual: DkType,
     },
+    return_type_mismatch: struct {
+        ast_node: AstNodeIndex,
+        declared: DkType,
+        inferred: DkType,
+    },
 };
 
 pub const TypeErrorInfo = struct {
@@ -125,7 +115,7 @@ pub const TypeErrorInfo = struct {
     fn_instantiation_stack_len: usize,
 
     pub const InstantiationInfo = struct {
-        fn_decl_idx: FnDeclIndex, // points into FtAst structure. FIXME: this is what I want. but how to fill in this info?
+        fn_decl_idx: ft_ast.FnDeclIndex, // points into FtAst structure. FIXME: this is what I want. but how to fill in this info?
         fn_call_ast_idx: AstNodeIndex,
     };
 
@@ -133,10 +123,10 @@ pub const TypeErrorInfo = struct {
 };
 
 // -----------------------------------------------------------------------
-// DkType ↔ DeclIndex mapping for builtin types
+// DkType ↔ nr.DeclIndex mapping for builtin types
 // -----------------------------------------------------------------------
 
-fn dkTypeFromBuiltinDecl(decl: DeclIndex) ?DkType {
+fn dkTypeFromBuiltinDecl(decl: nr.DeclIndex) ?DkType {
     return switch (decl) {
         .Int => DkType.INT,
         .Float => DkType.FLOAT,
@@ -154,7 +144,7 @@ pub const FunctionInstance = struct {
     return_type: DkType = DkType.UNKNOWN,
     param_count: u8 = 0,
     first_param_type_idx: Types.Index = .NONE,
-    fn_decl_idx: FnDeclIndex = 0, // index into FtAst.fn_decls
+    fn_decl_idx: ft_ast.FnDeclIndex = 0, // index into FtAst.fn_decls
 };
 
 pub const FunctionInstanceKey = struct {
@@ -443,6 +433,13 @@ pub const InferResult = struct {
                         .{ pos.line, e.actual.langName() },
                     );
                 },
+                .return_type_mismatch => |e| {
+                    const pos = try par.printLineAndMarkAstNode(ast, writer, ts, e.ast_node, code_indent);
+                    try writer.print(
+                        "line {}: Error: declared return type {s} does not match inferred return type {s}.\n",
+                        .{ pos.line, e.declared.langName(), e.inferred.langName() },
+                    );
+                },
             }
             try ir.printInstantiationStack(ast, writer, ts, error_info, code_indent);
             try writer.writeByte('\n');
@@ -465,7 +462,7 @@ pub fn infer(
     gpa: std.mem.Allocator,
     ts: TokenStream,
     ast: *const AST,
-    di: *const DeclInfo,
+    di: *const nr.DeclInfo,
 ) !InferResult {
     var ft = try FtAst.init(gpa);
     errdefer ft.deinit();
@@ -569,7 +566,7 @@ const TypeInferer = struct {
     ast: *const AST,
 
     // From name resolution
-    di: *const DeclInfo,
+    di: *const nr.DeclInfo,
 
     // Output: FtAst being built
     ft: *FtAst,
@@ -581,8 +578,8 @@ const TypeInferer = struct {
     types: Types, // shared type array for struct member types (fn param types use fn_instances.param_types)
 
     // Per-instantiation state
-    decl_map: std.AutoHashMapUnmanaged(DeclIndex, VarDeclIndex),
-    current_scope: ScopeIndex,
+    decl_map: std.AutoHashMapUnmanaged(nr.DeclIndex, ft_ast.VarDeclIndex),
+    current_scope: ft_ast.ScopeIndex,
 
     // Error tracking
     fn_instantiation_stack: std.ArrayList(FunctionInstances.Index),
@@ -668,7 +665,8 @@ const TypeInferer = struct {
             }
         }
         const param_types = scratch[0..fn_template.param_count];
-        return try ti.actuallyInstantiateFunction(ft_idx, fn_template, param_types, DkType.UNKNOWN);
+
+        return try ti.actuallyInstantiateFunction(ft_idx, fn_template, param_types);
     }
 
     fn instantiateFunction(ti: *TypeInferer, fn_call_ast_idx: AstNodeIndex, ft_idx: nr.FunctionTemplates.Index, argument_types: []const DkType) !DkType {
@@ -715,12 +713,11 @@ const TypeInferer = struct {
             _ = ti.fn_instantiation_ast_idx_stack.pop();
         }
 
-        return ti.actuallyInstantiateFunction(ft_idx, fn_template, argument_types, DkType.UNKNOWN);
+        return ti.actuallyInstantiateFunction(ft_idx, fn_template, argument_types);
     }
 
-    fn actuallyInstantiateFunction(ti: *TypeInferer, ft_idx: nr.FunctionTemplates.Index, fn_template: *const nr.FunctionTemplate, param_types: []const DkType, return_type: DkType) !DkType {
+    fn actuallyInstantiateFunction(ti: *TypeInferer, ft_idx: nr.FunctionTemplates.Index, fn_template: *const nr.FunctionTemplate, param_types: []const DkType) !DkType {
         assert(param_types.len == fn_template.param_count);
-
         const params = fn_template.params(&ti.di.params_or_members);
 
         // Save and restore per-instantiation state
@@ -738,15 +735,22 @@ const TypeInferer = struct {
         const fn_name = try ti.ft.arena.allocator().dupe(u8, ti.tokens[fn_ast_node.token_index].str(ti.source));
 
         // Create body scope
-        const scope_idx: ScopeIndex = @intCast(ti.ft.scopes.items.len);
+        const scope_idx: ft_ast.ScopeIndex = @intCast(ti.ft.scopes.items.len);
         try ti.ft.scopes.append(ti.gpa, .{ .kind = .FN, .parent_scope = 0 });
         ti.current_scope = scope_idx;
 
+        // Get declared return type from AST if present
+        var declared_return_type = DkType.UNKNOWN;
+        if (fn_template.declaredReturnTypeNode(ti.ast)) |return_type_node_idx| {
+            const decl = ti.di.name_resolution[return_type_node_idx];
+            declared_return_type = dkTypeFromBuiltinDecl(decl) orelse DkType.UNKNOWN;
+        }
+
         // Create result VarDecl
-        const result_decl_idx: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const result_decl_idx: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         try ti.ft.var_decls.append(ti.gpa, .{
             .name = try ti.ft.arena.allocator().dupe(u8, "result"),
-            .type_ = return_type,
+            .type_ = declared_return_type,
             .kind = .RESULT,
             .parent_scope = scope_idx,
         });
@@ -755,10 +759,10 @@ const TypeInferer = struct {
         try ti.decl_map.put(ti.gpa, fn_template.result_var_decl_idx, result_decl_idx);
 
         // Create param VarDecls
-        const params_start: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const params_start: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         for (params, param_types) |param, ptype| {
             const param_name = try ti.ft.arena.allocator().dupe(u8, param.name(ti.ast, &ti.ts));
-            const var_decl_idx: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+            const var_decl_idx: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
             try ti.ft.var_decls.append(ti.gpa, .{
                 .name = param_name,
                 .type_ = ptype,
@@ -769,7 +773,7 @@ const TypeInferer = struct {
             const param_decl_idx = ti.di.name_resolution[param.name_ast_idx];
             try ti.decl_map.put(ti.gpa, param_decl_idx, var_decl_idx);
         }
-        const params_end: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const params_end: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
 
         // Store param types in the shared types array
         const first_param_type_idx = ti.fn_instances.param_types.items.len;
@@ -778,10 +782,10 @@ const TypeInferer = struct {
         const stored_param_types = Types.IndexRange.create(first_param_type_idx, fn_template.param_count);
 
         // Create FnDecl
-        const fn_decl_idx: FnDeclIndex = @intCast(ti.ft.fn_decls.items.len);
+        const fn_decl_idx: ft_ast.FnDeclIndex = @intCast(ti.ft.fn_decls.items.len);
         try ti.ft.fn_decls.append(ti.gpa, .{
             .name = fn_name,
-            .return_type = return_type,
+            .return_type = declared_return_type,
             .params = .{ .start = params_start, .end = params_end },
             .body_scope = scope_idx,
         });
@@ -793,7 +797,7 @@ const TypeInferer = struct {
                 .fn_template_idx = ft_idx,
                 .param_count = fn_template.param_count,
                 .first_param_type_idx = @enumFromInt(first_param_type_idx),
-                .return_type = return_type,
+                .return_type = declared_return_type,
                 .fn_decl_idx = fn_decl_idx,
             },
         );
@@ -806,12 +810,14 @@ const TypeInferer = struct {
         // Infer body
         try ti.inferBlockInto(fn_template.body_ast_idx, scope_idx);
 
-        // Resolve return type from result variable
+        // Resolve/validate return type
         const result_var = ti.ft.var_decls.items[result_decl_idx];
-        const actual_return_type = result_var.type_;
-        if (inst.return_type == DkType.UNKNOWN) {
-            inst.return_type = if (actual_return_type == DkType.UNKNOWN) DkType.VOID else actual_return_type;
-        }
+        if (declared_return_type != DkType.UNKNOWN and result_var.type_ != DkType.ERROR)
+            assert(result_var.type_ == declared_return_type); // otherwise and error should have been produced earlier.
+
+        // No annotation — infer from body
+        inst.return_type = if (result_var.type_ == DkType.UNKNOWN) DkType.VOID else result_var.type_;
+
         ti.ft.fn_decls.items[fn_decl_idx].return_type = inst.return_type;
 
         return inst.return_type;
@@ -852,7 +858,7 @@ const TypeInferer = struct {
         const struct_name = try arena.dupe(u8, ti.tokens[ti.di.declarations.items[@intFromEnum(template.decl_idx)].name_token_idx].str(ti.source));
 
         // Create member VarDecls
-        const members_start: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const members_start: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         for (members, member_types[0..template.member_count]) |m, mt| {
             const member_name = try arena.dupe(u8, m.name(ti.ast, &ti.ts));
             try ti.ft.var_decls.append(ti.gpa, .{
@@ -861,7 +867,7 @@ const TypeInferer = struct {
                 .kind = .VAR,
             });
         }
-        const members_end: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const members_end: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
 
         try ti.ft.struct_decls.append(ti.gpa, .{
             .name = struct_name,
@@ -876,12 +882,12 @@ const TypeInferer = struct {
     // Block inference + lowering
     // -----------------------------------------------------------------------
 
-    fn inferBlockInto(ti: *TypeInferer, block_ast_idx: AstNodeIndex, scope_idx: ScopeIndex) !void {
+    fn inferBlockInto(ti: *TypeInferer, block_ast_idx: AstNodeIndex, scope_idx: ft_ast.ScopeIndex) !void {
         const block_node = ti.ast.get(block_ast_idx);
         assert(block_node.tag == .BLOCK);
 
         var child_iter = block_node.children(ti.ast);
-        var prev_stmt_idx: StatementIndex = 0;
+        var prev_stmt_idx: ft_ast.StatementIndex = 0;
 
         while (child_iter.nextIdx()) |child_ast_idx| {
             const stmt_idx = try ti.inferStatement(child_ast_idx, scope_idx);
@@ -896,18 +902,18 @@ const TypeInferer = struct {
         }
     }
 
-    fn inferBlock(ti: *TypeInferer, block_ast_idx: AstNodeIndex, kind: Scope.Kind, parent_scope: ScopeIndex) !ScopeIndex {
-        const scope_idx: ScopeIndex = @intCast(ti.ft.scopes.items.len);
+    fn inferBlock(ti: *TypeInferer, block_ast_idx: AstNodeIndex, kind: Scope.Kind, parent_scope: ft_ast.ScopeIndex) !ft_ast.ScopeIndex {
+        const scope_idx: ft_ast.ScopeIndex = @intCast(ti.ft.scopes.items.len);
         try ti.ft.scopes.append(ti.gpa, .{ .kind = kind, .parent_scope = parent_scope });
         try ti.inferBlockInto(block_ast_idx, scope_idx);
         return scope_idx;
     }
 
-    fn inferDefer(ti: *TypeInferer, defer_ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+    fn inferDefer(ti: *TypeInferer, defer_ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) !ft_ast.StatementIndex {
         const defer_node = ti.ast.get(defer_ast_idx);
         assert(defer_node.tag == .DEFER);
 
-        var scope_idx: ScopeIndex = 0;
+        var scope_idx: ft_ast.ScopeIndex = 0;
 
         const child_node = ti.ast.get(defer_node.first_child);
         if (child_node.tag == .BLOCK) {
@@ -921,7 +927,7 @@ const TypeInferer = struct {
             ti.ft.scopes.items[scope_idx].first_statement = child_stmt_idx;
         }
 
-        const defer_stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const defer_stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .DEFER = .{
                 .line_number = ti.ts.token_lines[defer_node.token_index],
@@ -936,7 +942,7 @@ const TypeInferer = struct {
     // Statement inference + lowering
     // -----------------------------------------------------------------------
 
-    fn inferStatement(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) TypeInfererException!StatementIndex {
+    fn inferStatement(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) TypeInfererException!ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
         return switch (node.tag) {
             .DECLARATION => ti.inferDecl(ast_idx, parent_scope),
@@ -947,12 +953,12 @@ const TypeInferer = struct {
             .FOR => ti.inferFor(ast_idx, parent_scope),
             .DEFER => ti.inferDefer(ast_idx, parent_scope),
             .BREAK => blk: {
-                const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+                const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
                 try ti.ft.statements.append(ti.gpa, .{ .kind = .{ .BREAK = {} } });
                 break :blk stmt_idx;
             },
             .CONTINUE => blk: {
-                const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+                const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
                 try ti.ft.statements.append(ti.gpa, .{ .kind = .{ .CONTINUE = {} } });
                 break :blk stmt_idx;
             },
@@ -963,7 +969,7 @@ const TypeInferer = struct {
         };
     }
 
-    fn checkStructAnnotation(ti: *TypeInferer, ast_idx: AstNodeIndex, annotation_decl_idx: DeclIndex, rhs_type: DkType) !void {
+    fn checkStructAnnotation(ti: *TypeInferer, ast_idx: AstNodeIndex, annotation_decl_idx: nr.DeclIndex, rhs_type: DkType) !void {
         if (rhs_type == DkType.ERROR) return;
         if (!rhs_type.isStruct()) {
             try ti.addError(.{ .member_access_on_non_struct = .{ .ast_node = ast_idx, .actual = rhs_type } });
@@ -1039,7 +1045,7 @@ const TypeInferer = struct {
         return DkType.fromArrayInstance(@intCast(idx));
     }
 
-    fn setArrayExprType(ti: *TypeInferer, expr_idx: ExpressionIndex, array_type: DkType) !void {
+    fn setArrayExprType(ti: *TypeInferer, expr_idx: ft_ast.ExpressionIndex, array_type: DkType) !void {
         ti.ft.expressions.items[expr_idx].type_ = array_type;
         const ai = ti.ft.array_instances.items[array_type.arrayInstanceIdx()];
         if (ai.ndim == 1) {
@@ -1066,7 +1072,7 @@ const TypeInferer = struct {
     }
 
     const ArrayLitResult = struct {
-        expr_idx: ExpressionIndex,
+        expr_idx: ft_ast.ExpressionIndex,
         shape: ArrayShape,
         elem_type: DkType,
     };
@@ -1079,8 +1085,8 @@ const TypeInferer = struct {
         const node = ti.ast.get(ast_idx);
         var elem_type: DkType = DkType.UNKNOWN;
         var first_inner_shape: ?ArrayShape = null;
-        var first_elem_expr: ExpressionIndex = 0;
-        var prev_elem_expr: ExpressionIndex = 0;
+        var first_elem_expr: ft_ast.ExpressionIndex = 0;
+        var prev_elem_expr: ft_ast.ExpressionIndex = 0;
 
         var child_iter = node.children(ti.ast);
         while (child_iter.nextIdx()) |child_ast_idx| {
@@ -1088,7 +1094,7 @@ const TypeInferer = struct {
             if (child_node.tag == .FILL) {
                 const fill_val_ast_idx = child_node.first_child;
                 const fill_val_node = ti.ast.get(fill_val_ast_idx);
-                var fill_val_expr: ExpressionIndex = 0;
+                var fill_val_expr: ft_ast.ExpressionIndex = 0;
                 var fill_elem_type: DkType = DkType.UNKNOWN;
                 if (fill_val_node.tag == .ARRAY_LIT) {
                     const inner = try ti.inferArrayLit(fill_val_ast_idx);
@@ -1103,7 +1109,7 @@ const TypeInferer = struct {
                 } else if (fill_elem_type != DkType.UNKNOWN and fill_elem_type != DkType.ERROR and elem_type != fill_elem_type) {
                     try ti.addError(.{ .inconsistent_elem_types_in_array_lit = .{ .ast_node = child_ast_idx, .expected = elem_type, .actual = fill_elem_type } });
                 }
-                const fill_expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+                const fill_expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
                 try ti.ft.expressions.append(ti.gpa, .{
                     .type_ = DkType.UNKNOWN,
                     .kind = .{ .FILL = .{ .value = fill_val_expr } },
@@ -1153,7 +1159,7 @@ const TypeInferer = struct {
             }
         }
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = DkType.UNKNOWN,
             .kind = .{ .ARRAY_LIT = .{ .elems_start = first_elem_expr } },
@@ -1161,7 +1167,7 @@ const TypeInferer = struct {
         return .{ .expr_idx = expr_idx, .shape = shape, .elem_type = elem_type };
     }
 
-    fn inferArrayAccess(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferArrayAccess(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         assert(node.tag == .ARRAY_ACCESS);
 
@@ -1174,20 +1180,20 @@ const TypeInferer = struct {
         const base_type = ti.ft.expressions.items[base_expr].type_;
 
         if (base_type == DkType.ERROR) {
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
         if (!base_type.isArray()) {
             try ti.addError(.{ .symbol_is_not_array = .{ .ast_node = ast_idx, .actual = base_type } });
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
         const ai = ti.ft.array_instances.items[base_type.arrayInstanceIdx()];
-        var first_idx_expr: ExpressionIndex = 0;
-        var prev_idx_expr: ExpressionIndex = 0;
+        var first_idx_expr: ft_ast.ExpressionIndex = 0;
+        var prev_idx_expr: ft_ast.ExpressionIndex = 0;
         var idx_count: u8 = 0;
 
         const index_args_node = ti.ast.get(index_args_ast_idx);
@@ -1207,7 +1213,7 @@ const TypeInferer = struct {
         if (idx_count != ai.ndim)
             try ti.addError(.{ .wrong_num_fun_args = .{ .ast_node = ast_idx, .expected = ai.ndim, .actual = idx_count } });
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = ai.elem_type,
             .kind = .{ .ARRAY_ACCESS = .{ .base = base_expr, .indices_start = first_idx_expr } },
@@ -1215,7 +1221,7 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferDecl(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+    fn inferDecl(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) !ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
         assert(node.tag == .DECLARATION);
 
@@ -1224,7 +1230,7 @@ const TypeInferer = struct {
         const first_child = ti.ast.get(first_child_idx);
 
         var rhs_ast_idx: AstNodeIndex = undefined;
-        var type_decl_idx: DeclIndex = .NONE;
+        var type_decl_idx: nr.DeclIndex = .NONE;
         var has_array_annotation = false;
         if (first_child.tag == .TYPE) {
             rhs_ast_idx = first_child.next_sibling;
@@ -1238,7 +1244,7 @@ const TypeInferer = struct {
         const is_array_lit_rhs = ti.ast.get(rhs_ast_idx).tag == .ARRAY_LIT;
 
         var var_type: DkType = DkType.UNKNOWN;
-        var rhs_expr: ExpressionIndex = 0;
+        var rhs_expr: ft_ast.ExpressionIndex = 0;
 
         if (has_array_annotation and is_array_lit_rhs) {
             if (ti.resolveArrayAnnotation(first_child_idx)) |ann| {
@@ -1326,7 +1332,7 @@ const TypeInferer = struct {
 
         const var_name = try ti.ft.arena.allocator().dupe(u8, ti.tokens[node.token_index].str(ti.source));
 
-        const var_decl_idx: VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
+        const var_decl_idx: ft_ast.VarDeclIndex = @intCast(ti.ft.var_decls.items.len);
         try ti.ft.var_decls.append(ti.gpa, .{
             .name = var_name,
             .type_ = var_type,
@@ -1341,14 +1347,14 @@ const TypeInferer = struct {
         if (decl_idx != .NONE)
             try ti.decl_map.put(ti.gpa, decl_idx, var_decl_idx);
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .VAR_DECL = .{ .var_decl_idx = var_decl_idx, .rhs = rhs_expr } },
         });
         return stmt_idx;
     }
 
-    fn inferAssignment(ti: *TypeInferer, ast_idx: AstNodeIndex) !StatementIndex {
+    fn inferAssignment(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
         const op_token = ti.tokens[node.token_index];
         const assign_kind = tokenToAssignmentKind(op_token.tag);
@@ -1384,7 +1390,7 @@ const TypeInferer = struct {
                 } else if (ti.ft.var_decls.items[lhs_var_decl_idx].type_ != rhs_type and rhs_type != DkType.ERROR) {
                     try ti.addError(.{ .result_type_mismatch = .{ .ast_node = ast_idx, .lhs = ti.ft.var_decls.items[lhs_var_decl_idx].type_, .rhs = rhs_type } });
                 }
-                const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+                const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
                 try ti.ft.statements.append(ti.gpa, .{
                     .kind = .{ .ASSIGNMENT = .{ .lhs = lhs_expr, .kind = assign_kind, .rhs = rhs_expr } },
                 });
@@ -1413,14 +1419,14 @@ const TypeInferer = struct {
             }
         }
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .ASSIGNMENT = .{ .lhs = lhs_expr, .kind = assign_kind, .rhs = rhs_expr } },
         });
         return stmt_idx;
     }
 
-    fn inferIf(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+    fn inferIf(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) !ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
         const cte = node.conditionThenElse(ti.ast);
 
@@ -1429,12 +1435,12 @@ const TypeInferer = struct {
         try ti.expectType(cte.cond_idx, cond_type, DkType.BOOL);
 
         const then_scope = try ti.inferBlock(cte.then_idx, .IF, parent_scope);
-        const else_scope: ScopeIndex = if (cte.else_idx != 0)
+        const else_scope: ft_ast.ScopeIndex = if (cte.else_idx != 0)
             try ti.inferBlock(cte.else_idx, .ELSE, parent_scope)
         else
             0;
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .IF_STMT = .{
                 .condition = cond_expr,
@@ -1445,7 +1451,7 @@ const TypeInferer = struct {
         return stmt_idx;
     }
 
-    fn inferWhile(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+    fn inferWhile(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) !ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
         const cond_idx = node.first_child;
         const body_ast_idx = ti.ast.get(cond_idx).next_sibling;
@@ -1456,7 +1462,7 @@ const TypeInferer = struct {
 
         const body_scope = try ti.inferBlock(body_ast_idx, .WHILE, parent_scope);
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .WHILE_LOOP = .{
                 .condition = cond_expr,
@@ -1466,16 +1472,16 @@ const TypeInferer = struct {
         return stmt_idx;
     }
 
-    fn inferFor(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ScopeIndex) !StatementIndex {
+    fn inferFor(ti: *TypeInferer, ast_idx: AstNodeIndex, parent_scope: ft_ast.ScopeIndex) !ft_ast.StatementIndex {
         const node = ti.ast.get(ast_idx);
 
         // Create a scope for the for-header (init variable lives here)
-        const header_scope: ScopeIndex = @intCast(ti.ft.scopes.items.len);
+        const header_scope: ft_ast.ScopeIndex = @intCast(ti.ft.scopes.items.len);
         try ti.ft.scopes.append(ti.gpa, .{ .kind = .INVALID, .parent_scope = parent_scope });
 
-        var init_stmt: StatementIndex = 0;
-        var cond_expr: ExpressionIndex = 0;
-        var incr_expr: ExpressionIndex = 0;
+        var init_stmt: ft_ast.StatementIndex = 0;
+        var cond_expr: ft_ast.ExpressionIndex = 0;
+        var incr_expr: ft_ast.ExpressionIndex = 0;
         var body_ast_idx: AstNodeIndex = 0;
 
         var child_idx = node.first_child;
@@ -1507,7 +1513,7 @@ const TypeInferer = struct {
 
         const body_scope = try ti.inferBlock(body_ast_idx, .FOR, header_scope);
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .FOR_LOOP = .{
                 .init_stmt = init_stmt,
@@ -1519,10 +1525,10 @@ const TypeInferer = struct {
         return stmt_idx;
     }
 
-    fn inferCallOrInstStmt(ti: *TypeInferer, ast_idx: AstNodeIndex) !StatementIndex {
+    fn inferCallOrInstStmt(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.StatementIndex {
         const expr_idx = try ti.inferExpr(ast_idx);
 
-        const stmt_idx: StatementIndex = @intCast(ti.ft.statements.items.len);
+        const stmt_idx: ft_ast.StatementIndex = @intCast(ti.ft.statements.items.len);
         try ti.ft.statements.append(ti.gpa, .{
             .kind = .{ .FN_CALL = expr_idx },
         });
@@ -1533,7 +1539,7 @@ const TypeInferer = struct {
     // Expression inference + lowering
     // -----------------------------------------------------------------------
 
-    fn inferExpr(ti: *TypeInferer, ast_idx: AstNodeIndex) TypeInfererException!ExpressionIndex {
+    fn inferExpr(ti: *TypeInferer, ast_idx: AstNodeIndex) TypeInfererException!ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         return switch (node.tag) {
             .ATOM => ti.inferAtom(ast_idx),
@@ -1546,10 +1552,10 @@ const TypeInferer = struct {
         };
     }
 
-    fn inferAtom(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferAtom(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         const token = ti.tokens[node.token_index];
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
 
         switch (token.tag) {
             .INT_LIT => {
@@ -1600,7 +1606,7 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferBinaryOp(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferBinaryOp(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         const token = ti.tokens[node.token_index];
 
@@ -1613,7 +1619,7 @@ const TypeInferer = struct {
         const lhs_type = ti.ft.expressions.items[lhs_expr].type_;
         const rhs_type = ti.ft.expressions.items[rhs_expr].type_;
 
-        const op: BinaryOp = switch (token.tag) {
+        const op: ft_ast.BinaryOp = switch (token.tag) {
             // zig fmt: off
             .PLUS    => .ADD,
             .MINUS   => .SUB,
@@ -1677,7 +1683,7 @@ const TypeInferer = struct {
             }
         }
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = result_type,
             .kind = .{ .BINARY_OP = .{ .op = op, .lhs = lhs_expr, .rhs = rhs_expr } },
@@ -1685,14 +1691,14 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferUnaryOp(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferUnaryOp(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         const token = ti.tokens[node.token_index];
 
         const operand_expr = try ti.inferExpr(node.first_child);
         const operand_type = ti.ft.expressions.items[operand_expr].type_;
 
-        const op: UnaryOp = switch (token.tag) {
+        const op: ft_ast.UnaryOp = switch (token.tag) {
             .MINUS => .NEGATE,
             .NOT => .BOOL_NOT,
             else => unreachable,
@@ -1717,7 +1723,7 @@ const TypeInferer = struct {
             }
         }
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = result_type,
             .kind = .{ .UNARY_OP = .{ .op = op, .operand = operand_expr } },
@@ -1725,14 +1731,14 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferCallOrInst(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferCallOrInst(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         assert(node.tag == .CALL_OR_INST);
 
         const decl_idx = ti.di.name_resolution[ast_idx];
         if (decl_idx == .NONE) {
             // Unknown — error was already reported in name resolution
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
@@ -1744,7 +1750,7 @@ const TypeInferer = struct {
             .STRUCT => return ti.inferStructInst(ast_idx, decl_idx),
             else => {
                 // symbol is not callable — error was already reported in name resolution
-                const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+                const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
                 try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
                 return expr_idx;
             },
@@ -1753,7 +1759,7 @@ const TypeInferer = struct {
 
     const ResolvedArgs = struct {
         types: [MAX_NUM_FUNCTION_PARAMS]DkType,
-        exprs: [MAX_NUM_FUNCTION_PARAMS]ExpressionIndex,
+        exprs: [MAX_NUM_FUNCTION_PARAMS]ft_ast.ExpressionIndex,
         count: u8,
     };
 
@@ -1824,7 +1830,7 @@ const TypeInferer = struct {
         return result;
     }
 
-    fn inferFnCall(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: DeclIndex) !ExpressionIndex {
+    fn inferFnCall(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: nr.DeclIndex) !ft_ast.ExpressionIndex {
         // Find function template by decl_idx
         const ft_idx = blk: {
             for (ti.di.fn_templates.items[1..], 1..) |ft_item, i| {
@@ -1841,8 +1847,8 @@ const TypeInferer = struct {
         const arg_types = resolved.types[0..fn_template.param_count];
 
         // Build linked list of arg expressions in param order (includes evaluated defaults for omitted args)
-        var first_arg_expr: ExpressionIndex = 0;
-        var prev_arg_expr: ExpressionIndex = 0;
+        var first_arg_expr: ft_ast.ExpressionIndex = 0;
+        var prev_arg_expr: ft_ast.ExpressionIndex = 0;
         for (0..fn_template.param_count) |i| {
             const ae = resolved.exprs[i];
             if (ae == 0) continue;
@@ -1856,18 +1862,18 @@ const TypeInferer = struct {
         // Instantiate function (does type checking and creates FnDecl if needed)
         const return_type = ti.instantiateFunction(ast_idx, ft_idx, arg_types) catch |err| switch (err) {
             error.WrongNumberOfFunctionArguments => {
-                const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+                const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
                 try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
                 return expr_idx;
             },
             else => return err,
         };
 
-        // Find the FnDeclIndex for this instance
+        // Find the ft_ast.FnDeclIndex for this instance
         const inst = ti.fn_instances.getPtr(.{ .template_idx = ft_idx, .param_types = arg_types }).?;
         const fn_decl_idx = inst.fn_decl_idx;
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = return_type,
             .kind = .{ .FN_CALL = .{ .function = fn_decl_idx, .args_start = first_arg_expr } },
@@ -1875,7 +1881,7 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferStructInst(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: DeclIndex) !ExpressionIndex {
+    fn inferStructInst(ti: *TypeInferer, ast_idx: AstNodeIndex, decl_idx: nr.DeclIndex) !ft_ast.ExpressionIndex {
         // Find struct template by decl_idx
         const st_idx = blk: {
             for (ti.di.struct_templates.items[1..], 1..) |st_item, i| {
@@ -1894,8 +1900,8 @@ const TypeInferer = struct {
         const struct_type = try ti.instantiateStruct(st_idx, resolved.types[0..template.member_count]);
 
         // Build linked list of member value expressions in member order
-        var first_member_expr: ExpressionIndex = 0;
-        var prev_member_expr: ExpressionIndex = 0;
+        var first_member_expr: ft_ast.ExpressionIndex = 0;
+        var prev_member_expr: ft_ast.ExpressionIndex = 0;
         for (0..template.member_count) |i| {
             const me = resolved.exprs[i];
             if (me == 0) continue;
@@ -1906,7 +1912,7 @@ const TypeInferer = struct {
             prev_member_expr = me;
         }
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = struct_type,
             .kind = .{ .STRUCT_INST = .{
@@ -1917,7 +1923,7 @@ const TypeInferer = struct {
         return expr_idx;
     }
 
-    fn inferMemberAccess(ti: *TypeInferer, ast_idx: AstNodeIndex) !ExpressionIndex {
+    fn inferMemberAccess(ti: *TypeInferer, ast_idx: AstNodeIndex) !ft_ast.ExpressionIndex {
         const node = ti.ast.get(ast_idx);
         assert(node.tag == .MEMBER_ACCESS);
 
@@ -1926,14 +1932,14 @@ const TypeInferer = struct {
         const base_type = ti.ft.expressions.items[base_expr].type_;
 
         if (base_type == DkType.ERROR) {
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
         if (!base_type.isStruct()) {
             try ti.addError(.{ .member_access_on_non_struct = .{ .ast_node = ast_idx, .actual = base_type } });
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
@@ -1954,14 +1960,14 @@ const TypeInferer = struct {
 
         if (member_idx == null) {
             try ti.addError(.{ .unknown_field = .{ .ast_node = ast_idx, .field_name = node.token_index } });
-            const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+            const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
             try ti.ft.expressions.append(ti.gpa, .{ .type_ = DkType.ERROR });
             return expr_idx;
         }
 
         const member_type = member_concrete_types[member_idx.?];
 
-        const expr_idx: ExpressionIndex = @intCast(ti.ft.expressions.items.len);
+        const expr_idx: ft_ast.ExpressionIndex = @intCast(ti.ft.expressions.items.len);
         try ti.ft.expressions.append(ti.gpa, .{
             .type_ = member_type,
             .kind = .{ .MEMBER_ACCESS = .{ .base = base_expr, .member_idx = member_idx.? } },
@@ -1973,7 +1979,7 @@ const TypeInferer = struct {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn tokenToAssignmentKind(tag: tok.Token.Tag) AssignmentKind {
+    fn tokenToAssignmentKind(tag: tok.Token.Tag) ft_ast.AssignmentKind {
         return switch (tag) {
             // zig fmt: off
             .ASSIGN      => .ASSIGN,

@@ -167,6 +167,34 @@ test "parse function declaration with complex params" {
     try testParser(source, Parser.parseFnDecl, expected, false);
 }
 
+test "parse function declaration with return type annotation" {
+    const source =
+        \\fn add(a: Int, b: Int) -> Int
+        \\  result = a + b
+    ;
+    const expected = .{
+        AstNodeTag.FNDECL, "add",
+        .{
+            AstNodeTag.FNPARAMS,
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "a", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" } },
+            .{ AstNodeTag.PARAM, Token.Tag.IDENTIFIER, "b", .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" } },
+        },
+        .{ AstNodeTag.TYPE, Token.Tag.IDENTIFIER, "Int" },
+        .{
+            AstNodeTag.BLOCK, .{
+                AstNodeTag.BINARY_OP, Token.Tag.ASSIGN, "=",
+                .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "result" },
+                .{
+                    AstNodeTag.BINARY_OP, Token.Tag.PLUS, "+",
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "a" },
+                    .{ AstNodeTag.ATOM, Token.Tag.IDENTIFIER, "b" },
+                },
+            },
+        },
+    };
+    try testParser(source, Parser.parseFnDecl, expected, false);
+}
+
 test "parse mini program" {
     const source =
         \\fn main()

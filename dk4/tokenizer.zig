@@ -60,6 +60,7 @@ pub const Token = struct {
         DIVASSIGN,
         PLUSASSIGN,
         MINUSASSIGN,
+        RARROW,
 
         UNDERSCORE,
 
@@ -290,10 +291,12 @@ pub const Tokenizer = struct {
                 return t.emit(.PLUS, 1);
             },
 
-            // .MINUS, .MINUSASSIGN
+            // .MINUS, .MINUSASSIGN, .RARROW
             '-' => {
                 if (tail.len >= 2 and tail[1] == '=')
                     return t.emit(.MINUSASSIGN, 2);
+                if (tail.len >= 2 and tail[1] == '>')
+                    return t.emit(.RARROW, 2);
                 return t.emit(.MINUS, 1);
             },
 

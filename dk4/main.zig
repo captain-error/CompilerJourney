@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // --- Name resolution ---
-    var di = try nr.resolve(gpa, &parse_res.ast, ts.tokens, source, parse_res.root_node);
+    var di = try nr.resolve(gpa, &parse_res.ast, &ts, source, parse_res.root_node);
     defer di.deinit();
 
     if (di.hasErrors()) {

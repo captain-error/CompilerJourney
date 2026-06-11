@@ -91,6 +91,17 @@ pub const FunctionTemplate = struct {
     pub fn params(self: *const FunctionTemplate, params_array: *const ParamsOrMembers) []const ParamOrMember {
         return params_array.slice(self.first_param_idx, self.param_count);
     }
+
+    /// Returns the AstNodeIndex of the return type TYPE node, or 0 if absent.
+    pub fn declaredReturnTypeNode(self: *const FunctionTemplate, ast: *const AST) ?AstNodeIndex {
+        const params_node = ast.get(self.ast_idx).first_child;
+        const sibling_idx = ast.get(params_node).next_sibling;
+        assert(sibling_idx != 0);
+        const sibling = ast.get(sibling_idx);
+        if (sibling.tag == .TYPE)
+            return sibling_idx;
+        return null;
+    }
 };
 
 pub const FunctionTemplates = util.ArrayList(FunctionTemplate);
@@ -521,9 +532,12 @@ const Resolver = struct {
             .kind = .RESULT_VARIABLE,
         });
 
-        // Resolve body
+        // Resolve body (skip past optional return type node)
         const fn_params_node = r.ast.get(node.first_child);
-        const body_node_idx = fn_params_node.next_sibling;
+        var body_node_idx = fn_params_node.next_sibling;
+        assert(body_node_idx != 0);
+        if (r.ast.get(body_node_idx).tag == .TYPE)
+            body_node_idx = r.ast.get(body_node_idx).next_sibling;
         try r.resolveBlock(body_node_idx);
 
         r.exitBlock();
@@ -720,12 +734,24 @@ const Resolver = struct {
             }
         }
 
-        const body_ast_idx = fn_params_node.next_sibling;
-        assert(body_ast_idx > 0);
+        // Resolve return type annotation if present
+        const body_or_return_type_node_idx = fn_params_node.next_sibling;
+        assert(body_or_return_type_node_idx != 0);
+        var body_node_idx = body_or_return_type_node_idx;
+        const body_or_return_type_node = r.ast.get(body_or_return_type_node_idx);
+        if (body_or_return_type_node.tag == .TYPE) {
+            const return_type_node = body_or_return_type_node;
+            if (r.resolveTypeAnnotation(return_type_node.token_index)) |type_decl| {
+                r.di.name_resolution[body_or_return_type_node_idx] = type_decl;
+            } else {
+                try r.addError(.{ .undecl_type = return_type_node.token_index });
+            }
+            body_node_idx = return_type_node.next_sibling;
+        }
 
         _ = try r.di.fn_templates.append(.{
             .ast_idx = node_idx,
-            .body_ast_idx = body_ast_idx,
+            .body_ast_idx = body_node_idx,
             .param_count = param_count,
             .typevar_count = typevar_count,
             .first_param_idx = first_param_idx,

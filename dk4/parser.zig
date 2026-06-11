@@ -373,6 +373,13 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         p.next();
 
+        // Optional return type: -> Type
+        var return_type_node: AstNodeIndex = 0;
+        if (p.peek(0).tag == .RARROW) {
+            p.next();
+            return_type_node = try p.parseType();
+        }
+
         if (!try p.expectToken(.EOL))
             return error.UnexpectedToken;
         p.next();
@@ -381,7 +388,12 @@ pub const Parser = struct {
         const params_node = p.ast.get(params_idx);
 
         params_node.first_child = param_list.start_index;
-        params_node.next_sibling = body_idx;
+        if (return_type_node != 0) {
+            params_node.next_sibling = return_type_node;
+            p.ast.get(return_type_node).next_sibling = body_idx;
+        } else {
+            params_node.next_sibling = body_idx;
+        }
 
         return node_idx;
     }
